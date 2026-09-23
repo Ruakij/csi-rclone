@@ -446,7 +446,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		mountArgs = append(mountArgs, "--config", configFile.Name())
 	} else {
 		// Disable "config not found" notice
-		mountArgs = append(mountArgs, "--config=''")
+		mountArgs = append(mountArgs, "--config=")
 	}
 
 	env := os.Environ()
