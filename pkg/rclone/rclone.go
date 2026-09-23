@@ -382,7 +382,7 @@ func waitForUploads(volumeID string) {
 func RcloneRPC(socket string, method string, input string) (output string, err error) {
 	req, err := http.NewRequest("POST", "http://rclone/"+method, strings.NewReader(input))
 	if err != nil {
-		return "", fmt.Errorf("cannot create HTTP request: %v", err)
+		return "", fmt.Errorf("cannot create HTTP request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -394,13 +394,13 @@ func RcloneRPC(socket string, method string, input string) (output string, err e
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cannot send HTTP request: %v", err)
+		return "", fmt.Errorf("cannot send HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("cannot read HTTP response: %v", err)
+		return "", fmt.Errorf("cannot read HTTP response: %w", err)
 	}
 	return string(body), nil
 }
