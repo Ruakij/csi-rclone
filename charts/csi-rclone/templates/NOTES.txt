@@ -1,0 +1,23 @@
+{{ include "csi-rclone.fullname" . }} is installed. PersistentVolumes use it with:
+
+  csi:
+    driver: csi-rclone
+    volumeHandle: <unique name>
+    volumeAttributes:
+      remote: s3
+      remotePath: bucket/path
+
+{{- if not .Values.rcloneSecret.create }}
+
+Defaults for all volumes are read from the Secret rclone-secret in {{ .Release.Namespace }}, if it exists.
+{{- end }}
+{{- if .Values.unrestrictedRcloneOptions }}
+
+WARNING: unrestrictedRcloneOptions is set. Whoever can write PersistentVolumes or
+rclone-secret has root on every node.
+{{- end }}
+{{- if eq .Values.kubeletRootDir "/var/lib/kubelet" }}
+
+kubeletRootDir is the default /var/lib/kubelet. If this is k3s, RKE2 or MicroK8s,
+check the node's real kubelet directory.
+{{- end }}
