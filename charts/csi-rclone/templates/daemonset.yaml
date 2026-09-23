@@ -1,0 +1,140 @@
+{{- $kubelet := include "csi-rclone.kubeletRootDir" . }}
+{{- $socketDir := printf "%s/plugins/csi-rclone" $kubelet }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "csi-rclone.fullname" . }}-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "csi-rclone.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "csi-rclone.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node
+  updateStrategy:
+    {{- toYaml .Values.node.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "csi-rclone.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "csi-rclone.nodeServiceAccountName" . }}
+      priorityClassName: {{ .Values.node.priorityClassName }}
+      hostNetwork: true
+      {{- if ne .Values.daemonLifetime "in-container" }}
+      # rclone pids are handed to host systemd, so they must mean the same process on both sides
+      hostPID: true
+      {{- end }}
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: node-driver-registrar
+          image: "{{ .Values.registrar.image.repository }}:{{ .Values.registrar.image.tag }}"
+          imagePullPolicy: {{ .Values.registrar.image.pullPolicy }}
+          args:
+            - --v={{ .Values.logLevel }}
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $socketDir }}/csi.sock
+          resources:
+            {{- toYaml .Values.registrar.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: rclone
+          image: {{ include "csi-rclone.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          args:
+            - /bin/csi-rclone-plugin
+            - --nodeid=$(NODE_ID)
+            - --endpoint=unix:///csi/csi.sock
+            - --v={{ .Values.logLevel }}
+            - --daemon-lifetime={{ .Values.daemonLifetime }}
+            {{- with .Values.scopeMemoryMax }}
+            - --scope-memory-max={{ . }}
+            {{- end }}
+            {{- with .Values.scopeTasksMax }}
+            - --scope-tasks-max={{ . }}
+            {{- end }}
+            {{- with .Values.allowedBackends }}
+            - --allowed-backends={{ join "," . }}
+            {{- end }}
+            {{- with .Values.allowedEndpoints }}
+            - --allowed-endpoints={{ join "," . }}
+            {{- end }}
+            {{- if .Values.unrestrictedRcloneOptions }}
+            - --unrestricted-rclone-options
+            {{- end }}
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            # Kubelet passes host paths, so they are mounted at the same path.
+            - name: pods-dir
+              mountPath: {{ $kubelet }}/pods
+              mountPropagation: Bidirectional
+            - name: staging-dir
+              mountPath: {{ $kubelet }}/plugins/kubernetes.io/csi
+              mountPropagation: Bidirectional
+            - name: state-dir
+              mountPath: /var/lib/csi-rclone
+            {{- if ne .Values.daemonLifetime "in-container" }}
+            - name: systemd
+              mountPath: /run/systemd
+            {{- end }}
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: {{ $socketDir }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ $kubelet }}/plugins_registry
+            type: Directory
+        - name: pods-dir
+          hostPath:
+            path: {{ $kubelet }}/pods
+            type: Directory
+        - name: staging-dir
+          hostPath:
+            path: {{ $kubelet }}/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
+        - name: state-dir
+          hostPath:
+            path: /var/lib/csi-rclone
+            type: DirectoryOrCreate
+        {{- if ne .Values.daemonLifetime "in-container" }}
+        # Missing on nodes without systemd, where auto falls back to in-container
+        - name: systemd
+          hostPath:
+            path: /run/systemd
+        {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

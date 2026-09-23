@@ -1,0 +1,15 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "csi-rclone.labels" . | nindent 4 }}
+provisioner: csi-rclone
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+parameters:
+  pathPattern: {{ .Values.storageClass.pathPattern | quote }}
+  {{- if .Values.storageClass.sharedRemote }}
+  sharedRemote: "true"
+  {{- end }}
+{{- end }}
