@@ -71,7 +71,11 @@ spec:
   - ReadWriteMany
   capacity:
     storage: 10Gi
-  storageClassName: rclone
+  # Only this PVC can bind the PV, and no provisioner uses the empty class
+  claimRef:
+    namespace: default
+    name: data-rclone-example
+  storageClassName: ""
   csi:
     driver: csi-rclone
     volumeHandle: data-id
