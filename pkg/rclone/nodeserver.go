@@ -1,6 +1,8 @@
 package rclone
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -8,9 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -28,41 +29,19 @@ import (
 	csicommon "github.com/kubernetes-csi/drivers/pkg/csi-common"
 )
 
-type mountContext struct {
-	rcPort int
-}
-
 type nodeServer struct {
 	Driver *Driver
 	*csicommon.DefaultNodeServer
-	mounter      *mount.SafeFormatAndMount
-	mountContext map[string]*mountContext
-	mu           sync.RWMutex
+	mounter *mount.SafeFormatAndMount
 }
 
-func (ns *nodeServer) getMountContext(targetPath string) *mountContext {
-	ns.mu.RLock()
-	defer ns.mu.RUnlock()
-	if mc, ok := ns.mountContext[targetPath]; ok {
-		return mc
-	}
-	return &mountContext{}
-}
+// Holds the rc socket and config file of each mount, only accessible to root.
+const runtimeDir = "/tmp/csi-rclone"
 
-func (ns *nodeServer) setMountContext(targetPath string, mc *mountContext) {
-	ns.mu.Lock()
-	defer ns.mu.Unlock()
-	// create a new mount context
-	if ns.mountContext == nil {
-		ns.mountContext = make(map[string]*mountContext)
-	}
-	ns.mountContext[targetPath] = mc
-}
-
-func (ns *nodeServer) deleteMountContext(targetPath string) {
-	ns.mu.Lock()
-	defer ns.mu.Unlock()
-	delete(ns.mountContext, targetPath)
+// runtimePath hashes the target path to stay within the unix socket path length limit.
+func runtimePath(targetPath string, ext string) string {
+	sum := sha256.Sum256([]byte(targetPath))
+	return filepath.Join(runtimeDir, hex.EncodeToString(sum[:])+ext)
 }
 
 func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -111,7 +90,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, e
 	}
 
-	rcPort, e := Mount(remote, remotePath, targetPath, configData, flags, isReadOnly(req))
+	e = Mount(remote, remotePath, targetPath, configData, flags, isReadOnly(req))
 	if e != nil {
 		if os.IsPermission(e) {
 			return nil, status.Error(codes.PermissionDenied, e.Error())
@@ -121,11 +100,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		}
 		return nil, status.Error(codes.Internal, e.Error())
 	}
-
-	// Save the mount context
-	ns.setMountContext(targetPath, &mountContext{
-		rcPort: rcPort,
-	})
 
 	return &csi.NodePublishVolumeResponse{}, nil
 }
@@ -208,8 +182,8 @@ type rcVfsStatsResponse struct {
 }
 
 // RcloneRPC is a helper function to call rclone rc server
-func RcloneRPC(host string, method string, input string) (output string, err error) {
-	url := fmt.Sprintf("http://%s/%s", host, method)
+func RcloneRPC(socket string, method string, input string) (output string, err error) {
+	url := "http://rclone/" + method
 
 	// Create a POST request to API
 	req, err := http.NewRequest("POST", url, strings.NewReader(input))
@@ -220,8 +194,11 @@ func RcloneRPC(host string, method string, input string) (output string, err err
 	// Set the content type to JSON
 	req.Header.Set("Content-Type", "application/json")
 
-	// Create a new HTTP client
-	client := &http.Client{}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		},
+	}}
 
 	// Send the request via the client
 	resp, err := client.Do(req)
@@ -249,10 +226,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.InvalidArgument, "NodeUnpublishVolume Target Path must be provided")
 	}
 
-	mountContext := ns.getMountContext(targetPath)
-	rcPort := mountContext.rcPort
+	rcSocket := runtimePath(targetPath, ".sock")
 
-	if rcPort != 0 {
+	if _, err := os.Stat(rcSocket); err == nil {
 		// Connect to rclone rpc server and query the operation status
 		// If the rclone process is still running, wait for it to finish cache sync
 		// If the rclone process is not running, proceed to volume unmount
@@ -262,8 +238,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		copyTimeout := time.Now().Add(1 * time.Hour)
 		for copyTimeout.After(time.Now()) {
 
-			// Try to load https://localhost:5572/core/stats and parse the JSON response
-			out, err := RcloneRPC(fmt.Sprintf("localhost:%s", strconv.Itoa(rcPort)), "core/stats", "{}")
+			out, err := RcloneRPC(rcSocket, "core/stats", "{}")
 			if err == nil {
 				var coreStats rcCoreStatsResponse
 				err = json.Unmarshal([]byte(out), &coreStats)
@@ -276,8 +251,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 			}
 
-			// Try to load https://localhost:5572/vfs/stats and parse the JSON response
-			out, err = RcloneRPC(fmt.Sprintf("localhost:%s", strconv.Itoa(rcPort)), "vfs/stats", "{}")
+			out, err = RcloneRPC(rcSocket, "vfs/stats", "{}")
 			if err == nil {
 				var vfsStats rcVfsStatsResponse
 				err = json.Unmarshal([]byte(out), &vfsStats)
@@ -296,9 +270,6 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		// Remove VFS cache
 		os.RemoveAll("/tmp/rclone-vfs-cache/" + targetPath)
 	}
-
-	// Remove mount context
-	ns.deleteMountContext(targetPath)
 
 	m := mount.New("")
 
@@ -321,6 +292,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 		glog.V(4).Infof("Volume %s unmounted successfully", req.VolumeId)
 	}
+
+	os.Remove(rcSocket)
+	os.Remove(runtimePath(targetPath, ".conf"))
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
@@ -380,21 +354,8 @@ func flagToEnvName(flag string) string {
 	return fmt.Sprintf("RCLONE_%s", flag)
 }
 
-// Credit: https://gist.github.com/sevkin/96bdae9274465b2d09191384f86ef39d
-func getFreePort() (port int, err error) {
-	var a *net.TCPAddr
-	if a, err = net.ResolveTCPAddr("tcp", "localhost:0"); err == nil {
-		var l *net.TCPListener
-		if l, err = net.ListenTCP("tcp", a); err == nil {
-			defer l.Close()
-			return l.Addr().(*net.TCPAddr).Port, nil
-		}
-	}
-	return 0, err
-}
-
 // Mount routine.
-func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string, readOnly bool) (rcPort int, err error) {
+func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string, readOnly bool) error {
 	mountCmd := "rclone"
 	mountArgs := []string{}
 
@@ -414,11 +375,12 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		glog.V(4).Infof("remote %s found in configData, remoteWithPath set to %s", remote, remoteWithPath)
 	}
 
-	// Find a free port for rclone rc
-	rcPort, err = getFreePort()
-	if err != nil {
-		return 0, err
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		return err
 	}
+	rcSocket := runtimePath(targetPath, ".sock")
+	// Left over if a previous rclone on this target died
+	os.Remove(rcSocket)
 
 	// rclone mount remote:path /path/to/mountpoint [flags]
 	mountArgs = append(
@@ -427,7 +389,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		remoteWithPath,
 		targetPath,
 		"--rc",
-		"--rc-addr="+fmt.Sprintf("localhost:%d", rcPort),
+		"--rc-addr=unix://"+rcSocket,
 		"--daemon",
 		"--daemon-wait=0",
 	)
@@ -437,29 +399,14 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		mountArgs = append(mountArgs, "--read-only")
 	}
 
-	// If a custom flag configData is defined,
-	// create a temporary file, fill it with  configData content,
-	// and run rclone with --config <tmpfile> flag
+	// rclone --daemon forks and reads the config again, and writes refreshed tokens back,
+	// so the file stays until NodeUnpublishVolume
 	if configData != "" {
-
-		configFile, err := ioutil.TempFile("", "rclone.conf")
-		if err != nil {
-			return 0, err
+		configFile := runtimePath(targetPath, ".conf")
+		if err := ioutil.WriteFile(configFile, []byte(configData), 0600); err != nil {
+			return err
 		}
-
-		// Normally, a defer os.Remove(configFile.Name()) should be placed here.
-		// However, due to a rclone mount --daemon flag, rclone forks and creates a race condition
-		// with this nodeplugin proceess. As a result, the config file gets deleted
-		// before it's reread by a forked process.
-
-		if _, err := configFile.Write([]byte(configData)); err != nil {
-			return 0, err
-		}
-		if err := configFile.Close(); err != nil {
-			return 0, err
-		}
-
-		mountArgs = append(mountArgs, "--config", configFile.Name())
+		mountArgs = append(mountArgs, "--config", configFile)
 	} else {
 		// Disable "config not found" notice
 		mountArgs = append(mountArgs, "--config=")
@@ -481,9 +428,8 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 	}
 
 	// create target, os.Mkdirall is noop if it exists
-	err = os.MkdirAll(targetPath, 0750)
-	if err != nil {
-		return 0, err
+	if err := os.MkdirAll(targetPath, 0750); err != nil {
+		return err
 	}
 
 	glog.V(4).Infof("executing mount command cmd=%s, remote=%s, targetpath=%s", mountCmd, remoteWithPath, targetPath)
@@ -493,9 +439,9 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("mounting failed: %v cmd: '%s' remote: '%s' targetpath: %s output: %q",
+		return fmt.Errorf("mounting failed: %v cmd: '%s' remote: '%s' targetpath: %s output: %q",
 			err, mountCmd, remoteWithPath, targetPath, string(out))
 	}
 
-	return rcPort, nil
+	return nil
 }
