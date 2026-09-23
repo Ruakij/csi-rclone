@@ -44,6 +44,16 @@ func (meta *pvcMetadata) stringParser(str string) string {
 	return str
 }
 
+// Labels and annotations are set by PVC owners, so the expanded path must not leave the pattern's prefix.
+func validateRemotePathSuffix(suffix string) error {
+	for _, segment := range strings.Split(suffix, "/") {
+		if segment == "." || segment == ".." {
+			return status.Errorf(codes.InvalidArgument, "pathPattern expands to %q, which contains a %q segment", suffix, segment)
+		}
+	}
+	return nil
+}
+
 func (cs *controllerServer) getPVC(name, namespace string) (*v1.PersistentVolumeClaim, error) {
 	clientset, e := GetK8sClient()
 	if e != nil {
@@ -106,6 +116,9 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 			if pathPattern != "" {
 				remotePathSuffix := metadata.stringParser(pathPattern)
 				if remotePathSuffix != "" {
+					if err := validateRemotePathSuffix(remotePathSuffix); err != nil {
+						return nil, err
+					}
 					if !strings.HasPrefix(remotePathSuffix, "/") {
 						remotePathSuffix = "/" + remotePathSuffix
 					}
