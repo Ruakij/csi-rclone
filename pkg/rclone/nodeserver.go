@@ -21,11 +21,11 @@ type nodeServer struct {
 	Driver *Driver
 }
 
-func (ns *nodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+func (ns *nodeServer) NodeGetInfo(_ context.Context, _ *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	return &csi.NodeGetInfoResponse{NodeId: ns.Driver.nodeID}, nil
 }
 
-func (ns *nodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+func (ns *nodeServer) NodeGetCapabilities(_ context.Context, _ *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	return &csi.NodeGetCapabilitiesResponse{
 		Capabilities: []*csi.NodeServiceCapability{{
 			Type: &csi.NodeServiceCapability_Rpc{
@@ -54,7 +54,7 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 
 	// Load default connection settings from secret
-	secret, _ := getSecret("rclone-secret")
+	secret, _ := getSecret(ctx, "rclone-secret")
 
 	remote, remotePath, configData, flags, e := extractFlags(req.GetVolumeContext(), secret)
 	if e != nil {
@@ -98,7 +98,7 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
-func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+func (ns *nodeServer) NodePublishVolume(_ context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	volumeID, stagingPath, targetPath := req.GetVolumeId(), req.GetStagingTargetPath(), req.GetTargetPath()
 	klog.V(4).Infof("NodePublishVolume: volume %s, target %s, readonly %v", volumeID, targetPath, req.GetReadonly())
 	if volumeID == "" || stagingPath == "" || targetPath == "" || req.GetVolumeCapability() == nil {
@@ -133,7 +133,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+func (ns *nodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	volumeID, targetPath := req.GetVolumeId(), req.GetTargetPath()
 	klog.V(4).Infof("NodeUnpublishVolume: volume %s, target %s", volumeID, targetPath)
 	if volumeID == "" || targetPath == "" {
@@ -204,14 +204,12 @@ func extractFlags(volumeContext map[string]string, secret *v1.Secret) (string, s
 	remotePath := flags["remotePath"]
 
 	if remotePathSuffix, ok := flags["remotePathSuffix"]; ok {
-		remotePath = remotePath + remotePathSuffix
+		remotePath += remotePathSuffix
 		delete(flags, "remotePathSuffix")
 	}
 
-	configData := ""
-	ok := false
-
-	if configData, ok = flags["configData"]; ok {
+	configData, ok := flags["configData"]
+	if ok {
 		delete(flags, "configData")
 	}
 
@@ -235,7 +233,7 @@ func validateFlags(flags map[string]string) error {
 	return nil
 }
 
-func getSecret(secretName string) (*v1.Secret, error) {
+func getSecret(ctx context.Context, secretName string) (*v1.Secret, error) {
 	clientset, e := GetK8sClient()
 	if e != nil {
 		return nil, status.Errorf(codes.Internal, "can not create kubernetes client: %s", e)
@@ -255,7 +253,7 @@ func getSecret(secretName string) (*v1.Secret, error) {
 
 	secret, e := clientset.CoreV1().
 		Secrets(namespace).
-		Get(context.Background(), secretName, metav1.GetOptions{})
+		Get(ctx, secretName, metav1.GetOptions{})
 
 	if e != nil {
 		return nil, status.Errorf(codes.Internal, "can't load csi-rclone settings from secret %s: %s", secretName, e)

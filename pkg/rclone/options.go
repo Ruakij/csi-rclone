@@ -153,7 +153,7 @@ func validateWrappedRemote(value string, sections map[string]map[string]string) 
 	}
 	schema, err := backendOf(backend)
 	if err != nil {
-		return fmt.Errorf("remote %q: %v", value, err)
+		return fmt.Errorf("remote %q: %w", value, err)
 	}
 	// Wrapping a wrapper allows cycles, which hang the mount
 	for option := range wrapperOptions {

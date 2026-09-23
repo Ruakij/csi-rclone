@@ -23,12 +23,12 @@ func init() {
 
 func main() {
 
-	flag.CommandLine.Parse([]string{})
+	_ = flag.CommandLine.Parse([]string{})
 
 	cmd := &cobra.Command{
 		Use:   "rclone",
 		Short: "CSI based rclone driver",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			handle()
 		},
 	}
@@ -36,10 +36,10 @@ func main() {
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 
 	cmd.Flags().StringVar(&nodeID, "nodeid", "", "node id")
-	cmd.MarkFlagRequired("nodeid")
+	cobra.CheckErr(cmd.MarkFlagRequired("nodeid"))
 
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "CSI endpoint")
-	cmd.MarkFlagRequired("endpoint")
+	cobra.CheckErr(cmd.MarkFlagRequired("endpoint"))
 
 	cmd.Flags().StringVar(&rclone.DaemonLifetime, "daemon-lifetime", "auto",
 		"auto, systemd or in-container: whether rclone runs in a host systemd scope and outlives the plugin")
@@ -54,7 +54,7 @@ func main() {
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Prints information about this version of csi rclone plugin",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Printf(`csi-rclone plugin
 Version:    %s
 `, rclone.DriverVersion)
@@ -64,7 +64,6 @@ Version:    %s
 	cmd.AddCommand(versionCmd)
 	versionCmd.ResetFlags()
 
-	cmd.ParseFlags(os.Args[1:])
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s", err.Error())
 		os.Exit(1)

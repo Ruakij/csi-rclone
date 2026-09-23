@@ -12,7 +12,7 @@ import (
 func mountStatus(path string) mountState {
 	var st unix.Statfs_t
 	err := unix.Statfs(path, &st)
-	return classifyMount(int64(st.Type), err)
+	return classifyMount(st.Type, err)
 }
 
 // lazyUnmount also succeeds when rclone is dead or files are still open, and when path is not mounted.
