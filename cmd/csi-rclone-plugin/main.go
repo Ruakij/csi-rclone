@@ -38,6 +38,12 @@ func main() {
 	cmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "CSI endpoint")
 	cmd.MarkPersistentFlagRequired("endpoint")
 
+	cmd.Flags().BoolVar(&rclone.UnrestrictedOptions, "unrestricted-rclone-options", false,
+		"pass every rclone option and backend through, which gives whoever writes PersistentVolumes or rclone-secret root on the node")
+	cmd.Flags().StringSliceVar(&rclone.AllowedBackends, "allowed-backends", nil, "backends volumes may use, default all supported ones")
+	cmd.Flags().StringSliceVar(&rclone.AllowedEndpoints, "allowed-endpoints", nil,
+		"hosts that endpoint options may point to, entries starting with . match subdomains, default any")
+
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Prints information about this version of csi rclone plugin",

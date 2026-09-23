@@ -136,8 +136,9 @@ func extractFlags(volumeContext map[string]string, secret *v1.Secret) (string, s
 		glog.V(4).Infof("No csi-rclone connection defaults secret found.")
 	}
 
-	if len(volumeContext) > 0 {
-		for k, v := range volumeContext {
+	for k, v := range volumeContext {
+		// Keys Kubernetes adds, like storage.kubernetes.io/csiProvisionerIdentity
+		if !strings.Contains(k, "/") {
 			flags[k] = v
 		}
 	}
@@ -163,6 +164,10 @@ func extractFlags(volumeContext map[string]string, secret *v1.Secret) (string, s
 
 	delete(flags, "remote")
 	delete(flags, "remotePath")
+
+	if e := validateOptions(remote, configData, flags); e != nil {
+		return "", "", "", flags, e
+	}
 
 	return remote, remotePath, configData, flags, nil
 }
