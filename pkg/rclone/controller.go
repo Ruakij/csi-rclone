@@ -2,6 +2,7 @@ package rclone
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -161,6 +162,9 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 				// Only allow some keys (umask, uid) to be passed to the volume context to avoid security issues
 				if key == "umask" {
+					if _, err := strconv.ParseUint(value, 8, 32); err != nil {
+						return nil, status.Errorf(codes.InvalidArgument, "annotation csi-rclone/umask %q is not an octal number", value)
+					}
 					volumeContext[key] = value
 				}
 			}
