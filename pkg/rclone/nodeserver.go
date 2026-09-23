@@ -66,7 +66,7 @@ func (ns *nodeServer) deleteMountContext(targetPath string) {
 }
 
 func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	glog.V(4).Infof("NodePublishVolume: called with args %+v", *req)
+	glog.V(4).Infof("NodePublishVolume: volume %s, target %s, readonly %v", req.GetVolumeId(), req.GetTargetPath(), req.GetReadonly())
 
 	targetPath := req.GetTargetPath()
 
