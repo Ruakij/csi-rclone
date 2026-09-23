@@ -21,3 +21,28 @@ func TestValidateRemotePathSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestValidatePathPatternIsolation(t *testing.T) {
+	for _, good := range []string{
+		"${.PVC.namespace}",
+		"${.PVC.namespace}/${.PVC.name}",
+		"/${.PVC.namespace}/${.PVC.annotations.csi-rclone/storage-path}",
+		"fixed/prefix/${.PVC.namespace}/${.PVC.name}",
+	} {
+		if err := validatePathPatternIsolation(good); err != nil {
+			t.Errorf("%q rejected: %v", good, err)
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"${.PVC.name}",
+		"${.PVC.annotations.csi-rclone/storage-path}/${.PVC.namespace}",
+		"${.PVC.namespace}${.PVC.name}",
+		"${.PVC.name}-${.PVC.namespace}",
+		"prefix-${.PVC.namespace}/x",
+	} {
+		if validatePathPatternIsolation(bad) == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

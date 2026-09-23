@@ -4,5 +4,6 @@ metadata:
   name: rclone
 # You will need to delete storageclass to update this field
 provisioner: csi-rclone
-# parameters:
-#   pathPattern: "${.PVC.namespace}/${.PVC.annotations.csi-rclone/storage-path}"
+parameters:
+  pathPattern: "${.PVC.namespace}/${.PVC.name}"
+  # pathPattern: "${.PVC.namespace}/${.PVC.annotations.csi-rclone/storage-path}"
