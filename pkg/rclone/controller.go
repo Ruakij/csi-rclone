@@ -44,6 +44,24 @@ func (meta *pvcMetadata) stringParser(str string) string {
 	return str
 }
 
+const namespacePlaceholder = "${.PVC.namespace}"
+
+// Anything tenant-controlled before the namespace segment would let PVCs in different namespaces
+// resolve to the same or nested remote paths.
+func validatePathPatternIsolation(pathPattern string) error {
+	i := strings.Index(pathPattern, namespacePlaceholder)
+	prefix, rest := "", ""
+	if i >= 0 {
+		prefix, rest = pathPattern[:i], pathPattern[i+len(namespacePlaceholder):]
+	}
+	if i < 0 || strings.Contains(prefix, "${") || (prefix != "" && !strings.HasSuffix(prefix, "/")) || (rest != "" && !strings.HasPrefix(rest, "/")) {
+		return status.Errorf(codes.InvalidArgument,
+			`pathPattern %q must contain %s as a whole path segment with only fixed text before it; set sharedRemote: "true" to share the remote path between namespaces`,
+			pathPattern, namespacePlaceholder)
+	}
+	return nil
+}
+
 // Labels and annotations are set by PVC owners, so the expanded path must not leave the pattern's prefix.
 func validateRemotePathSuffix(suffix string) error {
 	for _, segment := range strings.Split(suffix, "/") {
@@ -91,6 +109,15 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// parameter provided by external-provisioner (csi-provisioner)
 	if val, ok := parameters["csi.storage.k8s.io/pvc/namespace"]; ok {
 		pvcNamespace = val
+	}
+
+	if parameters["sharedRemote"] != "true" {
+		if err := validatePathPatternIsolation(parameters["pathPattern"]); err != nil {
+			return nil, err
+		}
+		if pvcName == "" || pvcNamespace == "" {
+			return nil, status.Error(codes.InvalidArgument, "PVC name and namespace missing, run csi-provisioner with --extra-create-metadata")
+		}
 	}
 
 	// If PVC name is provided, load the PVC definition

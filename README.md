@@ -88,10 +88,19 @@ Deploy example definition
 > `kubectl apply -f example/kubernetes/nginx-example.yaml`
 
 
+## StorageClass parameters
+
+Dynamically provisioned volumes all use `remote` and `remotePath` from `rclone-secret`. `pathPattern` appends a per-PVC suffix to `remotePath`, built from `${.PVC.namespace}`, `${.PVC.name}`, `${.PVC.labels.<key>}` and `${.PVC.annotations.<key>}`.
+
+- `pathPattern` must contain `${.PVC.namespace}` as a whole path segment, with only fixed text before it (e.g. `${.PVC.namespace}/${.PVC.name}`). Otherwise PVCs in different namespaces could mount each other's data, and provisioning fails.
+- `sharedRemote: "true"` disables this check, for StorageClasses where all PVCs are meant to share data.
+- Expanded paths containing `.` or `..` segments are rejected.
+- Deleting a PVC does not delete its data on the remote. A new PVC that expands to the same path gets the old data.
+
 ## PersistentVolumeClaim annotations
 
 - `csi-rclone/umask` - `umask` parameter for `rclone mount`.
-- [if configured in storageclass `parameters.pathPattern`] `csi-rclone/storage-path` - Secret name that contains rclone configuration.
+- [if configured in storageclass `parameters.pathPattern`] `csi-rclone/storage-path` - path segment for `${.PVC.annotations.csi-rclone/storage-path}`.
 
 Provisioning of other parameters is currently unsupported, create PersistentVolume resource with `volumeAttributes` to define them.
 
