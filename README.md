@@ -17,7 +17,7 @@ i.e (heads up - minio setup example is severly outdated).
 helm upgrade --install --create-namespace --namespace minio minio minio/minio --version 6.0.5 --set resources.requests.memory=512Mi --set secretKey=SECRET_ACCESS_KEY --set accessKey=ACCESS_KEY_ID
 ```
 
-2. Configure defaults by pushing secret to kube-system namespace. This is optional if you will always define `volumeAttributes` in PersistentVolume.
+2. Configure defaults by pushing secret `rclone-secret` to the `csi-rclone` namespace. This is optional if you will always define `volumeAttributes` in PersistentVolume.
 
 ```
 apiVersion: v1
@@ -55,7 +55,7 @@ stringData:
 ```
 
 Deploy example secret
-> `kubectl apply -f example/kubernetes/rclone-secret-example.yaml --namespace kube-system`
+> `kubectl apply -f example/kubernetes/rclone-secret-example.yaml`
 
 3. You can override configuration via PersistentStorage resource definition. Leave volumeAttributes empty if you don't want to. Keys in `volumeAttributes` will be merged with predefined parameters.
 
@@ -107,6 +107,12 @@ Dynamically provisioned volumes all use `remote` and `remotePath` from `rclone-s
 - [if configured in storageclass `parameters.pathPattern`] `csi-rclone/storage-path` - path segment for `${.PVC.annotations.csi-rclone/storage-path}`.
 
 Provisioning of other parameters is currently unsupported, create PersistentVolume resource with `volumeAttributes` to define them.
+
+## Security
+
+- rclone runs as root in the privileged node plugin. Every key in `rclone-secret` and in PersistentVolume `volumeAttributes` becomes an rclone flag, and `configData` becomes the rclone config. rclone can run commands (`password-command`, `sftp-ssh`), write files (`log-file`) and mount local paths (`local` backend). Whoever can write `rclone-secret` or create PersistentVolumes therefore has root on every node. Do not delegate these rights to users who should not have it.
+- Static PersistentVolumes should set `claimRef`, otherwise a PVC in any namespace can bind them and use their credentials.
+- A volume is mounted read-only when the pod mounts it with `readOnly: true`, the access mode is `ReadOnlyMany`, or the PersistentVolume has `ro` in `mountOptions`. Other `mountOptions` are ignored; set rclone flags in `volumeAttributes`.
 
 ## Building plugin and creating image
 Current code is referencing projects repository on github.com. If you fork the repository, you have to change go includes in several places (use search and replace).
