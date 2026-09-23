@@ -102,11 +102,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		}
 	}
 
-	mountOptions := req.GetVolumeCapability().GetMount().GetMountFlags()
-	if req.GetReadonly() {
-		mountOptions = append(mountOptions, "ro")
-	}
-
 	// Load default connection settings from secret
 	secret, _ := getSecret("rclone-secret")
 
@@ -116,7 +111,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, e
 	}
 
-	rcPort, e := Mount(remote, remotePath, targetPath, configData, flags)
+	rcPort, e := Mount(remote, remotePath, targetPath, configData, flags, isReadOnly(req))
 	if e != nil {
 		if os.IsPermission(e) {
 			return nil, status.Error(codes.PermissionDenied, e.Error())
@@ -133,6 +128,22 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	})
 
 	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+func isReadOnly(req *csi.NodePublishVolumeRequest) bool {
+	readOnly := req.GetReadonly()
+	switch req.GetVolumeCapability().GetAccessMode().GetMode() {
+	case csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY, csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY:
+		readOnly = true
+	}
+	for _, flag := range req.GetVolumeCapability().GetMount().GetMountFlags() {
+		if flag == "ro" {
+			readOnly = true
+		} else {
+			glog.Warningf("ignoring unsupported mount option %q, use volumeAttributes for rclone flags", flag)
+		}
+	}
+	return readOnly
 }
 
 func extractFlags(volumeContext map[string]string, secret *v1.Secret) (string, string, string, map[string]string, error) {
@@ -383,7 +394,7 @@ func getFreePort() (port int, err error) {
 }
 
 // Mount routine.
-func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string) (rcPort int, err error) {
+func Mount(remote string, remotePath string, targetPath string, configData string, flags map[string]string, readOnly bool) (rcPort int, err error) {
 	mountCmd := "rclone"
 	mountArgs := []string{}
 
@@ -420,6 +431,11 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		"--daemon",
 		"--daemon-wait=0",
 	)
+
+	// Command line flags take precedence over the RCLONE_* environment set from flags
+	if readOnly {
+		mountArgs = append(mountArgs, "--read-only")
+	}
 
 	// If a custom flag configData is defined,
 	// create a temporary file, fill it with  configData content,
