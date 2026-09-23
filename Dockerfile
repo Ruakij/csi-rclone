@@ -21,5 +21,5 @@ COPY --from=rclone /usr/local/bin/rclone /usr/bin/rclone
 
 COPY --from=builder /go/src/csi-rclone-nodeplugin/_output/csi-rclone-plugin /bin/csi-rclone-plugin
 
-ENTRYPOINT [ "/sbin/tini", "--"]
+ENTRYPOINT [ "/sbin/tini", "-s", "--"]
 CMD ["/bin/csi-rclone-plugin"]

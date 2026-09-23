@@ -108,6 +108,22 @@ Dynamically provisioned volumes all use `remote` and `remotePath` from `rclone-s
 
 Provisioning of other parameters is currently unsupported, create PersistentVolume resource with `volumeAttributes` to define them.
 
+## Mount lifetime
+
+Each volume is mounted by one rclone process per node, which all pods on that node share. The node plugin moves it into a transient host systemd scope, `csi-rclone-<hash>.scope`, so it survives restarts and upgrades of the node plugin. Running rclone processes keep their rclone version until the volume is unmounted.
+
+The node plugin remounts a volume when its rclone dies, and binds it into the pods' volume paths again. Running containers keep seeing `Transport endpoint is not connected` until they restart.
+
+Node plugin flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--daemon-lifetime` | `auto` | `systemd` requires host systemd, `in-container` keeps rclone in the node plugin container, where it dies with it. `auto` uses systemd if it is reachable. |
+| `--scope-memory-max` | none | `MemoryMax` of each rclone scope, e.g. `2Gi`. rclone does not count against the node plugin's resource limits. |
+| `--scope-tasks-max` | none | `TasksMax` of each rclone scope. |
+
+rclone logs to `/var/lib/csi-rclone/<hash>/rclone.log` on the node.
+
 ## rclone option allow-list
 
 The node plugin rejects volumes with rclone options that could read or write local files, run commands, reach local sockets or use the node's cloud identity. It allows:
@@ -130,7 +146,9 @@ The node plugin rejects volumes with rclone options that could read or write loc
 - rclone runs as root in the privileged node plugin. Keys in `rclone-secret` and PersistentVolume `volumeAttributes` become rclone flags, and `configData` becomes the rclone config, both limited by the [rclone option allow-list](#rclone-option-allow-list). With `--unrestricted-rclone-options`, rclone can run commands (`password-command`, `sftp-ssh`), write files (`log-file`) and mount local paths (`local` backend), so whoever can write `rclone-secret` or create PersistentVolumes has root on every node.
 - The allow-list does not stop rclone from connecting to any host, including cloud metadata endpoints and cluster-internal services. Set `--allowed-endpoints`, and block these hosts with a NetworkPolicy or firewall, since rclone follows redirects and resolves DNS itself.
 - Static PersistentVolumes should set `claimRef`, otherwise a PVC in any namespace can bind them and use their credentials.
-- A volume is mounted read-only when the pod mounts it with `readOnly: true`, the access mode is `ReadOnlyMany`, or the PersistentVolume has `ro` in `mountOptions`. Other `mountOptions` are ignored; set rclone flags in `volumeAttributes`.
+- rclone mounts a volume read-only when the access mode is `ReadOnlyMany` or the PersistentVolume has `ro` in `mountOptions`. A pod that mounts it with `readOnly: true` gets a read-only bind of a writable mount. Other `mountOptions` are ignored; set rclone flags in `volumeAttributes`.
+- The node plugin uses `hostPID` and the host systemd D-Bus socket to start rclone scopes, which is host root as well.
+- `/var/lib/csi-rclone` on each node holds every staged volume's rclone config and flags, including credentials, readable only by root.
 
 ## Building plugin and creating image
 Current code is referencing projects repository on github.com. If you fork the repository, you have to change go includes in several places (use search and replace).

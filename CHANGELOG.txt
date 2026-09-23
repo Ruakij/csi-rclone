@@ -8,6 +8,9 @@ Unreleased:
   - Expanded `pathPattern` values with `.` or `..` segments and non-octal `csi-rclone/umask` annotations are rejected.
   - Go 1.27, CSI spec 1.13 and client-go 0.37. The CSI requests are not logged.
   - One rclone mount per volume and node, staged in NodeStageVolume and bind-mounted into each pod. Its rc socket, config and VFS cache live in `/var/lib/csi-rclone` on the node.
+  - rclone runs in a host systemd scope and survives node plugin restarts and upgrades. The node plugin needs `hostPID` and `/run/systemd`, see the node plugin manifest. New flags `--daemon-lifetime`, `--scope-memory-max` and `--scope-tasks-max`.
+  - The node plugin remounts volumes whose rclone died and binds them into the pods again. Running containers need a restart to see the new mount.
+  - Upgrading still loses all mounts once, because the previous release runs rclone inside its container. Drain nodes or restart the workloads.
   - rclone remote control runs on a unix socket instead of a localhost TCP port. Config files from `configData` are deleted on unmount.
   - Breaking: rclone backends and options are limited to an allow-list, see "rclone option allow-list" in the README. New flags `--allowed-backends`, `--allowed-endpoints` and `--unrestricted-rclone-options`.
 
