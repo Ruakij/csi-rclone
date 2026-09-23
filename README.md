@@ -108,9 +108,27 @@ Dynamically provisioned volumes all use `remote` and `remotePath` from `rclone-s
 
 Provisioning of other parameters is currently unsupported, create PersistentVolume resource with `volumeAttributes` to define them.
 
+## rclone option allow-list
+
+The node plugin rejects volumes with rclone options that could read or write local files, run commands, reach local sockets or use the node's cloud identity. It allows:
+
+- the backends `s3`, `gcs`, `azureblob`, `b2`, `swift`, `webdav`, `sftp`, `ftp`, `drive`, `onedrive`, `dropbox` and `crypt`, set as `remote` or as `type` in `configData`,
+- their options from `pkg/rclone/options_gen.go`, which excludes file, path and command options and ambient credentials like `env_auth`,
+- mount, VFS, filter and network tuning flags, but not `cache-dir`, `log-file` or `config`,
+- `crypt` remotes wrapping a `configData` remote or `:type:path`, but no local path, connection string or other `crypt` remote.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--allowed-backends` | all above | Restricts the backends further, e.g. `--allowed-backends=s3,crypt`. |
+| `--allowed-endpoints` | any | Hosts that endpoint options may point at. Entries starting with `.` allow subdomains. |
+| `--unrestricted-rclone-options` | `false` | Allows every rclone option and backend. |
+
+`options_gen.go` is generated for the rclone version in the image: `rclone config providers | go run ./hack/gen-options v1.74.3 > pkg/rclone/options_gen.go`. Review the diff after an rclone update.
+
 ## Security
 
-- rclone runs as root in the privileged node plugin. Every key in `rclone-secret` and in PersistentVolume `volumeAttributes` becomes an rclone flag, and `configData` becomes the rclone config. rclone can run commands (`password-command`, `sftp-ssh`), write files (`log-file`) and mount local paths (`local` backend). Whoever can write `rclone-secret` or create PersistentVolumes therefore has root on every node. Do not delegate these rights to users who should not have it.
+- rclone runs as root in the privileged node plugin. Keys in `rclone-secret` and PersistentVolume `volumeAttributes` become rclone flags, and `configData` becomes the rclone config, both limited by the [rclone option allow-list](#rclone-option-allow-list). With `--unrestricted-rclone-options`, rclone can run commands (`password-command`, `sftp-ssh`), write files (`log-file`) and mount local paths (`local` backend), so whoever can write `rclone-secret` or create PersistentVolumes has root on every node.
+- The allow-list does not stop rclone from connecting to any host, including cloud metadata endpoints and cluster-internal services. Set `--allowed-endpoints`, and block these hosts with a NetworkPolicy or firewall, since rclone follows redirects and resolves DNS itself.
 - Static PersistentVolumes should set `claimRef`, otherwise a PVC in any namespace can bind them and use their credentials.
 - A volume is mounted read-only when the pod mounts it with `readOnly: true`, the access mode is `ReadOnlyMany`, or the PersistentVolume has `ro` in `mountOptions`. Other `mountOptions` are ignored; set rclone flags in `volumeAttributes`.
 

@@ -7,6 +7,7 @@ Unreleased:
   - Breaking: volumes are mounted read-only for `readOnly: true`, `ReadOnlyMany` and `ro` in `mountOptions`.
   - Expanded `pathPattern` values with `.` or `..` segments and non-octal `csi-rclone/umask` annotations are rejected.
   - rclone remote control runs on a unix socket instead of a localhost TCP port. Config files from `configData` are deleted on unmount.
+  - Breaking: rclone backends and options are limited to an allow-list, see "rclone option allow-list" in the README. New flags `--allowed-backends`, `--allowed-endpoints` and `--unrestricted-rclone-options`.
 
 3.1.0:
   - Rclone binary update to v1.74.3

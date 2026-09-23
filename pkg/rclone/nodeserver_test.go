@@ -30,3 +30,13 @@ func TestIsReadOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractFlagsSkipsKubernetesKeys(t *testing.T) {
+	_, _, _, flags, err := extractFlags(map[string]string{
+		"remote": "s3", "remotePath": "bucket",
+		"storage.kubernetes.io/csiProvisionerIdentity": "1-csi-rclone",
+	}, nil)
+	if err != nil || len(flags) != 0 {
+		t.Errorf("extractFlags() = %v, %v", flags, err)
+	}
+}
