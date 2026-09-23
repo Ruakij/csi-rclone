@@ -68,6 +68,11 @@ spec:
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: "Bidirectional"
+            - name: staging-dir
+              mountPath: /var/lib/kubelet/plugins/kubernetes.io/csi
+              mountPropagation: "Bidirectional"
+            - name: state-dir
+              mountPath: /var/lib/csi-rclone
       volumes:
         - name: plugin-dir
           hostPath:
@@ -77,6 +82,14 @@ spec:
           hostPath:
             path: /var/lib/kubelet/pods
             type: Directory
+        - name: staging-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/kubernetes.io/csi
+            type: DirectoryOrCreate
+        - name: state-dir
+          hostPath:
+            path: /var/lib/csi-rclone
+            type: DirectoryOrCreate
         - hostPath:
             path: /var/lib/kubelet/plugins_registry
             type: DirectoryOrCreate

@@ -6,6 +6,8 @@ Unreleased:
   - Breaking: dynamic provisioning fails unless StorageClass `pathPattern` contains `${.PVC.namespace}` as a whole path segment, or the StorageClass sets `sharedRemote: "true"`. StorageClass parameters are immutable, so existing StorageClasses have to be recreated.
   - Breaking: volumes are mounted read-only for `readOnly: true`, `ReadOnlyMany` and `ro` in `mountOptions`.
   - Expanded `pathPattern` values with `.` or `..` segments and non-octal `csi-rclone/umask` annotations are rejected.
+  - Go 1.27, CSI spec 1.13 and client-go 0.37. The CSI requests are not logged.
+  - One rclone mount per volume and node, staged in NodeStageVolume and bind-mounted into each pod. Its rc socket, config and VFS cache live in `/var/lib/csi-rclone` on the node.
   - rclone remote control runs on a unix socket instead of a localhost TCP port. Config files from `configData` are deleted on unmount.
   - Breaking: rclone backends and options are limited to an allow-list, see "rclone option allow-list" in the README. New flags `--allowed-backends`, `--allowed-endpoints` and `--unrestricted-rclone-options`.
 

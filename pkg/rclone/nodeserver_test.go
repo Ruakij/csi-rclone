@@ -15,18 +15,17 @@ func TestIsReadOnly(t *testing.T) {
 	}
 	rwx := csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER
 	for _, tc := range []struct {
-		req  *csi.NodePublishVolumeRequest
-		want bool
+		capability *csi.VolumeCapability
+		want       bool
 	}{
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(rwx)}, false},
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(rwx, "noatime")}, false},
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(rwx), Readonly: true}, true},
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(rwx, "ro")}, true},
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY)}, true},
-		{&csi.NodePublishVolumeRequest{VolumeCapability: capability(csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY)}, true},
+		{capability(rwx), false},
+		{capability(rwx, "noatime"), false},
+		{capability(rwx, "ro"), true},
+		{capability(csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY), true},
+		{capability(csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY), true},
 	} {
-		if got := isReadOnly(tc.req); got != tc.want {
-			t.Errorf("isReadOnly(%v) = %v, want %v", tc.req, got, tc.want)
+		if got := isReadOnly(tc.capability); got != tc.want {
+			t.Errorf("isReadOnly(%v) = %v, want %v", tc.capability, got, tc.want)
 		}
 	}
 }
