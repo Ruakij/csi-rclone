@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wunderio/csi-rclone/pkg/rclone"
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -15,7 +16,7 @@ var (
 )
 
 func init() {
-	flag.Set("logtostderr", "true")
+	klog.InitFlags(nil)
 }
 
 func main() {
@@ -32,11 +33,11 @@ func main() {
 
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 
-	cmd.PersistentFlags().StringVar(&nodeID, "nodeid", "", "node id")
-	cmd.MarkPersistentFlagRequired("nodeid")
+	cmd.Flags().StringVar(&nodeID, "nodeid", "", "node id")
+	cmd.MarkFlagRequired("nodeid")
 
-	cmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "CSI endpoint")
-	cmd.MarkPersistentFlagRequired("endpoint")
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "CSI endpoint")
+	cmd.MarkFlagRequired("endpoint")
 
 	cmd.Flags().BoolVar(&rclone.UnrestrictedOptions, "unrestricted-rclone-options", false,
 		"pass every rclone option and backend through, which gives whoever writes PersistentVolumes or rclone-secret root on the node")

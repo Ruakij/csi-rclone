@@ -1,22 +1,21 @@
 package rclone
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/golang/glog"
-	csicommon "github.com/kubernetes-csi/drivers/pkg/csi-common"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
 type controllerServer struct {
-	*csicommon.DefaultControllerServer
+	csi.UnimplementedControllerServer
 }
 
 type pvcMetadata struct {
@@ -73,16 +72,16 @@ func validateRemotePathSuffix(suffix string) error {
 	return nil
 }
 
-func (cs *controllerServer) getPVC(name, namespace string) (*v1.PersistentVolumeClaim, error) {
+func (cs *controllerServer) getPVC(ctx context.Context, name, namespace string) (*v1.PersistentVolumeClaim, error) {
 	clientset, e := GetK8sClient()
 	if e != nil {
 		return nil, status.Errorf(codes.Internal, "can not create kubernetes client: %s", e)
 	}
 
 	// Get the PVC
-	pvc, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(name, metav1.GetOptions{})
+	pvc, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		glog.Errorf("Failed to get PVC: %v", err)
+		klog.Errorf("Failed to get PVC: %v", err)
 		return nil, err
 	}
 
@@ -124,9 +123,9 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// If PVC name is provided, load the PVC definition
 	if pvcName != "" {
 
-		pvc, err := cs.getPVC(pvcName, pvcNamespace)
+		pvc, err := cs.getPVC(ctx, pvcName, pvcNamespace)
 		if err != nil {
-			glog.Errorf("Failed to get PVC %s in namespace %s: %v", pvcName, pvcNamespace, err)
+			klog.Errorf("Failed to get PVC %s in namespace %s: %v", pvcName, pvcNamespace, err)
 			return nil, err
 		}
 
@@ -182,4 +181,14 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	return &csi.DeleteVolumeResponse{}, nil
+}
+
+func (cs *controllerServer) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
+	return &csi.ControllerGetCapabilitiesResponse{
+		Capabilities: []*csi.ControllerServiceCapability{{
+			Type: &csi.ControllerServiceCapability_Rpc{
+				Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME},
+			},
+		}},
+	}, nil
 }

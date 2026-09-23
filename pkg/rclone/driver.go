@@ -1,14 +1,17 @@
 package rclone
 
 import (
+	"context"
+
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/golang/glog"
-	csicommon "github.com/kubernetes-csi/drivers/pkg/csi-common"
+	"k8s.io/klog/v2"
 )
 
 type Driver struct {
-	csiDriver *csicommon.CSIDriver
-	endpoint  string
+	csi.UnimplementedIdentityServer
+
+	nodeID   string
+	endpoint string
 
 	ns *nodeServer
 	cs *controllerServer
@@ -20,40 +23,32 @@ var (
 )
 
 func NewDriver(nodeID, endpoint string) *Driver {
-	glog.Infof("Starting new %s driver in version %s", DriverName, DriverVersion)
+	klog.Infof("Starting new %s driver in version %s", DriverName, DriverVersion)
 
-	d := &Driver{}
-
-	d.endpoint = endpoint
-
-	d.csiDriver = csicommon.NewCSIDriver(DriverName, DriverVersion, nodeID)
-	d.csiDriver.AddVolumeCapabilityAccessModes([]csi.VolumeCapability_AccessMode_Mode{csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER})
-	d.csiDriver.AddControllerServiceCapabilities([]csi.ControllerServiceCapability_RPC_Type{csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME})
-
-	d.cs = NewControllerServer(d)
-	d.ns = NewNodeServer(d)
-
+	d := &Driver{nodeID: nodeID, endpoint: endpoint}
+	d.cs = &controllerServer{}
+	d.ns = &nodeServer{Driver: d}
 	return d
 }
 
-func NewNodeServer(d *Driver) *nodeServer {
-	return &nodeServer{
-		DefaultNodeServer: csicommon.NewDefaultNodeServer(d.csiDriver),
-	}
-}
-
-func NewControllerServer(d *Driver) *controllerServer {
-	return &controllerServer{
-		DefaultControllerServer: csicommon.NewDefaultControllerServer(d.csiDriver),
-	}
-}
-
 func (d *Driver) Run() {
-	s := csicommon.NewNonBlockingGRPCServer()
-	s.Start(d.endpoint,
-		csicommon.NewDefaultIdentityServer(d.csiDriver),
-		d.cs,
-		d.ns,
-	)
-	s.Wait()
+	serve(d.endpoint, d, d.cs, d.ns)
+}
+
+func (d *Driver) GetPluginInfo(ctx context.Context, req *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
+	return &csi.GetPluginInfoResponse{Name: DriverName, VendorVersion: DriverVersion}, nil
+}
+
+func (d *Driver) GetPluginCapabilities(ctx context.Context, req *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
+	return &csi.GetPluginCapabilitiesResponse{
+		Capabilities: []*csi.PluginCapability{{
+			Type: &csi.PluginCapability_Service_{
+				Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE},
+			},
+		}},
+	}, nil
+}
+
+func (d *Driver) Probe(ctx context.Context, req *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	return &csi.ProbeResponse{}, nil
 }

@@ -1,11 +1,12 @@
 package rclone
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -18,21 +19,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/golang/glog"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/kubernetes/pkg/util/mount"
-	"k8s.io/kubernetes/pkg/volume/util"
-
-	csicommon "github.com/kubernetes-csi/drivers/pkg/csi-common"
+	"k8s.io/klog/v2"
+	mount "k8s.io/mount-utils"
 )
 
 type nodeServer struct {
+	csi.UnimplementedNodeServer
 	Driver *Driver
-	*csicommon.DefaultNodeServer
-	mounter *mount.SafeFormatAndMount
+}
+
+func (ns *nodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+	return &csi.NodeGetInfoResponse{NodeId: ns.Driver.nodeID}, nil
+}
+
+func (ns *nodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+	return &csi.NodeGetCapabilitiesResponse{}, nil
 }
 
 // Holds the rc socket and config file of each mount, only accessible to root.
@@ -45,7 +49,7 @@ func runtimePath(targetPath string, ext string) string {
 }
 
 func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	glog.V(4).Infof("NodePublishVolume: volume %s, target %s, readonly %v", req.GetVolumeId(), req.GetTargetPath(), req.GetReadonly())
+	klog.V(4).Infof("NodePublishVolume: volume %s, target %s, readonly %v", req.GetVolumeId(), req.GetTargetPath(), req.GetReadonly())
 
 	targetPath := req.GetTargetPath()
 
@@ -63,20 +67,15 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	if !notMnt {
 		// testing original mount point, make sure the mount link is valid
-		if _, err := ioutil.ReadDir(targetPath); err == nil {
-			glog.V(4).Infof("already mounted to target %s", targetPath)
+		if _, err := os.ReadDir(targetPath); err == nil {
+			klog.V(4).Infof("already mounted to target %s", targetPath)
 			return &csi.NodePublishVolumeResponse{}, nil
 		}
 		// todo: mount link is invalid, now unmount and remount later (built-in functionality)
-		glog.Warningf("ReadDir %s failed with %v, unmount this directory", targetPath, err)
+		klog.Warningf("ReadDir %s failed with %v, unmount this directory", targetPath, err)
 
-		ns.mounter = &mount.SafeFormatAndMount{
-			Interface: mount.New(""),
-			Exec:      mount.NewOsExec(),
-		}
-
-		if err := ns.mounter.Unmount(targetPath); err != nil {
-			glog.Errorf("Unmount directory %s failed with %v", targetPath, err)
+		if err := mount.New("").Unmount(targetPath); err != nil {
+			klog.Errorf("Unmount directory %s failed with %v", targetPath, err)
 			return nil, err
 		}
 	}
@@ -86,7 +85,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	remote, remotePath, configData, flags, e := extractFlags(req.GetVolumeContext(), secret)
 	if e != nil {
-		glog.Warningf("storage parameter error: %s", e)
+		klog.Warningf("storage parameter error: %s", e)
 		return nil, e
 	}
 
@@ -114,7 +113,7 @@ func isReadOnly(req *csi.NodePublishVolumeRequest) bool {
 		if flag == "ro" {
 			readOnly = true
 		} else {
-			glog.Warningf("ignoring unsupported mount option %q, use volumeAttributes for rclone flags", flag)
+			klog.Warningf("ignoring unsupported mount option %q, use volumeAttributes for rclone flags", flag)
 		}
 	}
 	return readOnly
@@ -133,7 +132,7 @@ func extractFlags(volumeContext map[string]string, secret *v1.Secret) (string, s
 			flags[k] = string(v)
 		}
 	} else {
-		glog.V(4).Infof("No csi-rclone connection defaults secret found.")
+		klog.V(4).Infof("No csi-rclone connection defaults secret found.")
 	}
 
 	for k, v := range volumeContext {
@@ -215,7 +214,7 @@ func RcloneRPC(socket string, method string, input string) (output string, err e
 	defer resp.Body.Close()
 
 	// Read the response body
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("cannot read HTTP response: %v", err)
 	}
@@ -284,32 +283,24 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 
 	if notMnt && !mount.IsCorruptedMnt(err) {
-		glog.V(4).Infof("Volume not mounted")
+		klog.V(4).Infof("Volume not mounted")
 
 	} else {
-		err = util.UnmountPath(req.GetTargetPath(), m)
+		err = mount.CleanupMountPoint(req.GetTargetPath(), m, false)
 		if err != nil {
-			glog.V(4).Infof("Error while unmounting path: %s", err)
+			klog.V(4).Infof("Error while unmounting path: %s", err)
 			// This will exit and fail the NodeUnpublishVolume making it to retry unmount on the next api schedule trigger.
 			// Since we mount the volume with allow-non-empty now, we could skip this one too.
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
-		glog.V(4).Infof("Volume %s unmounted successfully", req.VolumeId)
+		klog.V(4).Infof("Volume %s unmounted successfully", req.VolumeId)
 	}
 
 	os.Remove(rcSocket)
 	os.Remove(runtimePath(targetPath, ".conf"))
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
-}
-
-func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	return &csi.NodeUnstageVolumeResponse{}, nil
-}
-
-func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
-	return &csi.NodeStageVolumeResponse{}, nil
 }
 
 func validateFlags(flags map[string]string) error {
@@ -338,11 +329,11 @@ func getSecret(secretName string) (*v1.Secret, error) {
 		return nil, status.Errorf(codes.Internal, "can't get current namespace for secret %s: %s", secretName, err)
 	}
 
-	glog.V(4).Infof("Loading csi-rclone connection defaults from secret %s/%s", namespace, secretName)
+	klog.V(4).Infof("Loading csi-rclone connection defaults from secret %s/%s", namespace, secretName)
 
 	secret, e := clientset.CoreV1().
 		Secrets(namespace).
-		Get(secretName, metav1.GetOptions{})
+		Get(context.Background(), secretName, metav1.GetOptions{})
 
 	if e != nil {
 		return nil, status.Errorf(codes.Internal, "can't load csi-rclone settings from secret %s: %s", secretName, e)
@@ -377,7 +368,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 
 	if strings.Contains(configData, "["+remote+"]") {
 		remoteWithPath = fmt.Sprintf("%s:%s", remote, remotePath)
-		glog.V(4).Infof("remote %s found in configData, remoteWithPath set to %s", remote, remoteWithPath)
+		klog.V(4).Infof("remote %s found in configData, remoteWithPath set to %s", remote, remoteWithPath)
 	}
 
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -408,7 +399,7 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 	// so the file stays until NodeUnpublishVolume
 	if configData != "" {
 		configFile := runtimePath(targetPath, ".conf")
-		if err := ioutil.WriteFile(configFile, []byte(configData), 0600); err != nil {
+		if err := os.WriteFile(configFile, []byte(configData), 0600); err != nil {
 			return err
 		}
 		mountArgs = append(mountArgs, "--config", configFile)
@@ -437,8 +428,8 @@ func Mount(remote string, remotePath string, targetPath string, configData strin
 		return err
 	}
 
-	glog.V(4).Infof("executing mount command cmd=%s, remote=%s, targetpath=%s", mountCmd, remoteWithPath, targetPath)
-	glog.V(4).Infof("mountArgs: %v", mountArgs)
+	klog.V(4).Infof("executing mount command cmd=%s, remote=%s, targetpath=%s", mountCmd, remoteWithPath, targetPath)
+	klog.V(4).Infof("mountArgs: %v", mountArgs)
 
 	cmd := exec.Command(mountCmd, mountArgs...)
 	cmd.Env = env
