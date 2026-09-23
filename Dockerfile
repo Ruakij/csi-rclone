@@ -5,11 +5,13 @@ WORKDIR $GOPATH/src/csi-rclone-nodeplugin
 COPY . .
 RUN make plugin
 
+FROM rclone/rclone:1.74.3@sha256:623378ad0ff3ebd5cebf77720843c0e02edfe46e2d5b5ac6bed54c6371780dfb AS rclone
+
 ####
 FROM alpine:3.23
-RUN apk add --no-cache ca-certificates bash fuse3 curl unzip tini
+RUN apk add --no-cache ca-certificates bash fuse3 tini
 
-RUN curl https://rclone.org/install.sh | bash
+COPY --from=rclone /usr/local/bin/rclone /usr/bin/rclone
 
 # Use pre-compiled version (with cirectory marker patch)
 # https://github.com/rclone/rclone/pull/5323
