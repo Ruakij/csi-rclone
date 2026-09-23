@@ -7,12 +7,14 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wunderio/csi-rclone/pkg/rclone"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 )
 
 var (
-	endpoint string
-	nodeID   string
+	endpoint       string
+	nodeID         string
+	scopeMemoryMax string
 )
 
 func init() {
@@ -39,6 +41,10 @@ func main() {
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "CSI endpoint")
 	cmd.MarkFlagRequired("endpoint")
 
+	cmd.Flags().StringVar(&rclone.DaemonLifetime, "daemon-lifetime", "auto",
+		"auto, systemd or in-container: whether rclone runs in a host systemd scope and outlives the plugin")
+	cmd.Flags().StringVar(&scopeMemoryMax, "scope-memory-max", "", "MemoryMax of each rclone systemd scope, e.g. 2Gi")
+	cmd.Flags().Uint64Var(&rclone.ScopeTasksMax, "scope-tasks-max", 0, "TasksMax of each rclone systemd scope")
 	cmd.Flags().BoolVar(&rclone.UnrestrictedOptions, "unrestricted-rclone-options", false,
 		"pass every rclone option and backend through, which gives whoever writes PersistentVolumes or rclone-secret root on the node")
 	cmd.Flags().StringSliceVar(&rclone.AllowedBackends, "allowed-backends", nil, "backends volumes may use, default all supported ones")
@@ -68,6 +74,18 @@ Version:    %s
 }
 
 func handle() {
+	switch rclone.DaemonLifetime {
+	case "auto", "systemd", "in-container":
+	default:
+		klog.Fatalf("invalid --daemon-lifetime %q", rclone.DaemonLifetime)
+	}
+	if scopeMemoryMax != "" {
+		q, err := resource.ParseQuantity(scopeMemoryMax)
+		if err != nil || q.Sign() <= 0 {
+			klog.Fatalf("invalid --scope-memory-max %q", scopeMemoryMax)
+		}
+		rclone.ScopeMemoryMax = uint64(q.Value())
+	}
 	d := rclone.NewDriver(nodeID, endpoint)
 	d.Run()
 }

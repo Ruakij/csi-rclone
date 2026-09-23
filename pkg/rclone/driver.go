@@ -32,6 +32,7 @@ func NewDriver(nodeID, endpoint string) *Driver {
 }
 
 func (d *Driver) Run() {
+	go reconcile(context.Background())
 	serve(d.endpoint, d, d.cs, d.ns)
 }
 

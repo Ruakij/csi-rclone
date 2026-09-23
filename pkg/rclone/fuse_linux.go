@@ -8,15 +8,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const fuseSuperMagic = 0x65735546
-
-// isFUSEMount is false for a dead FUSE mount, whose statfs fails with ENOTCONN.
-func isFUSEMount(path string) bool {
+// mountStatus uses statfs, which unlike stat is never answered from the attribute cache.
+func mountStatus(path string) mountState {
 	var st unix.Statfs_t
-	if err := unix.Statfs(path, &st); err != nil {
-		return false
-	}
-	return st.Type == fuseSuperMagic
+	err := unix.Statfs(path, &st)
+	return classifyMount(int64(st.Type), err)
 }
 
 // lazyUnmount also succeeds when rclone is dead or files are still open, and when path is not mounted.

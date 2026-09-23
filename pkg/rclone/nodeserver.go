@@ -90,6 +90,7 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 	if err := lazyUnmount(stagingPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	stopScope(ctx, volumeID)
 	if err := os.RemoveAll(volumeDir(volumeID)); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -107,20 +108,24 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	lockVolume(volumeID)
 	defer unlockVolume(volumeID)
 
+	if !isFUSEMount(stagingPath) {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s", volumeID, stagingPath)
+	}
+	// Recorded before binding, so reconcile can bind it again after rclone dies
+	readOnly := req.GetReadonly() || isReadOnly(req.GetVolumeCapability())
+	if err := updateTargets(volumeID, targetPath, &readOnly); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
 	if isFUSEMount(targetPath) {
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	if err := lazyUnmount(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if !isFUSEMount(stagingPath) {
-		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s", volumeID, stagingPath)
-	}
 
 	if err := os.MkdirAll(targetPath, 0750); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	readOnly := req.GetReadonly() || isReadOnly(req.GetVolumeCapability())
 	if err := bindMount(stagingPath, targetPath, readOnly); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -142,6 +147,9 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if err := updateTargets(volumeID, targetPath, nil); err != nil && !os.IsNotExist(err) {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
