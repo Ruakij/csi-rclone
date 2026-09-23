@@ -1,5 +1,13 @@
 # CHANGELOG
 
+Unreleased:
+  - rclone pinned to v1.74.3 by image digest.
+  - Node plugin RBAC reduced to `get` on `rclone-secret` in the `csi-rclone` namespace. Delete the old ClusterRole and ClusterRoleBinding `csi-nodeplugin-rclone` after upgrading.
+  - Breaking: dynamic provisioning fails unless StorageClass `pathPattern` contains `${.PVC.namespace}` as a whole path segment, or the StorageClass sets `sharedRemote: "true"`. StorageClass parameters are immutable, so existing StorageClasses have to be recreated.
+  - Breaking: volumes are mounted read-only for `readOnly: true`, `ReadOnlyMany` and `ro` in `mountOptions`.
+  - Expanded `pathPattern` values with `.` or `..` segments and non-octal `csi-rclone/umask` annotations are rejected.
+  - rclone remote control runs on a unix socket instead of a localhost TCP port. Config files from `configData` are deleted on unmount.
+
 3.1.0:
   - Rclone binary update to v1.74.3
   - Alpine base image update to 3.23
