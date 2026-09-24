@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
@@ -244,6 +245,78 @@ func TestVolumes(t *testing.T) {
 			out, err := run("docker", "exec", node, "sh", "-c",
 				"systemctl list-units --no-legend 'csi-rclone-*'; ls -A /var/lib/csi-rclone; grep rclone /proc/self/mountinfo; true")
 			return err == nil && out == "", nil
+		})
+	})
+}
+
+// TestSharedMounts mounts one remote as an ephemeral volume with credentials from a
+// Secret and as a PersistentVolume with them in volumeAttributes: both reuse one rclone.
+func TestSharedMounts(t *testing.T) {
+	attrs := map[string]string{
+		"remote": "s3", "remotePath": "bucket/shared", "s3-provider": "Rclone",
+		"s3-endpoint": "http://s3." + driverNS + ".svc.cluster.local:9000",
+	}
+	creds := map[string]string{"s3-access-key-id": "key", "s3-secret-access-key": "secret"}
+	pvAttrs := maps.Clone(attrs)
+	maps.Copy(pvAttrs, creds)
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s3-credentials"}, StringData: creds}
+	if _, err := client.CoreV1().Secrets(ns).Create(t.Context(), secret, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.CoreV1().Secrets(ns).Delete(context.Background(), secret.Name, metav1.DeleteOptions{})
+	})
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-shared"},
+		Spec: corev1.PersistentVolumeSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Capacity:         corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			ClaimRef:         &corev1.ObjectReference{Namespace: ns, Name: "shared"},
+			StorageClassName: "",
+			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{
+				Driver: "csi-rclone", VolumeHandle: "e2e-shared", VolumeAttributes: pvAttrs,
+			}},
+		},
+	}
+	if _, err := client.CoreV1().PersistentVolumes().Create(t.Context(), pv, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.CoreV1().PersistentVolumes().Delete(context.Background(), pv.Name, metav1.DeleteOptions{})
+	})
+	createPVC(t, "shared", "", pv.Name)
+
+	create(t, pod("ephemeral", corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver: "csi-rclone", VolumeAttributes: attrs, NodePublishSecretRef: &corev1.LocalObjectReference{Name: secret.Name},
+	}}}))
+	create(t, pod("persistent", claim("shared", false)))
+	t.Cleanup(func() { _ = deletePods(context.Background(), "ephemeral", "persistent") })
+	ready(t, "ephemeral")
+	ready(t, "persistent")
+
+	rclones := func() string {
+		out, _ := run("docker", "exec", node, "sh", "-c", "pgrep -fc '^rclone mount :s3:bucket/shared'; true")
+		return out
+	}
+	t.Run("volumes with the same arguments reuse one rclone", func(t *testing.T) {
+		expect(t, "ephemeral", "echo shared > /data/f && cat /data/f", "shared")
+		expect(t, "persistent", "cat /data/f", "shared")
+		if n := rclones(); n != "1" {
+			t.Fatalf("%s rclone processes, want 1", n)
+		}
+	})
+
+	t.Run("the last volume unmounts it", func(t *testing.T) {
+		if err := deletePods(t.Context(), "ephemeral"); err != nil {
+			t.Fatal(err)
+		}
+		expect(t, "persistent", "cat /data/f", "shared")
+		if err := deletePods(t.Context(), "persistent"); err != nil {
+			t.Fatal(err)
+		}
+		poll(t, time.Minute, "no shared rclone", func(context.Context) (bool, error) {
+			return rclones() == "0", nil
 		})
 	})
 }

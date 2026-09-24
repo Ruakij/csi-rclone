@@ -49,6 +49,13 @@ allowedEndpoints: []  # empty: any host
 # Gives whoever writes PersistentVolumes or rclone-secret root on every node.
 unrestrictedRcloneOptions: false
 
+# Inline CSI volumes in pod specs, see "Ephemeral volumes" in the README. Changing
+# this on an existing release needs the CSIDriver deleted first, the field is immutable.
+ephemeralVolumes: true
+# Reuses a running rclone mount for any volume, PersistentVolume or ephemeral, whose
+# rclone arguments match it exactly, credentials included, instead of starting another.
+reuseMounts: true
+
 # Default rclone settings for all volumes, read from the rclone-secret Secret in
 # the release namespace. Leave create false to manage that Secret yourself.
 rcloneSecret:

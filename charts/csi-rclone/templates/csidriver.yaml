@@ -7,4 +7,10 @@ metadata:
     {{- include "csi-rclone.labels" . | nindent 4 }}
 spec:
   attachRequired: true
+  # Tells ephemeral volumes apart in NodePublishVolume
   podInfoOnMount: true
+  volumeLifecycleModes:
+    - Persistent
+    {{- if .Values.ephemeralVolumes }}
+    - Ephemeral
+    {{- end }}

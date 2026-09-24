@@ -207,17 +207,12 @@ func reconcileVolume(ctx context.Context, volumeID string, logLive bool) {
 			return
 		}
 		klog.Warningf("rclone for volume %s died, remounting %s", volumeID, st.StagingPath)
-		if err := lazyUnmount(st.StagingPath); err != nil {
-			klog.Errorf("remounting volume %s: %v", volumeID, err)
-			return
-		}
-		stopScope(ctx, volumeID)
-		if err := startRclone(ctx, st); err != nil {
+		if err := remount(ctx, st); err != nil {
 			klog.Errorf("remounting volume %s: %v", volumeID, err)
 			return
 		}
 	case mountGone:
-		// Kubelet removed the staging path, the volume is gone
+		// Kubelet removed the staging path 4.0.0 mounted at, the volume is gone
 		klog.Infof("removing state of volume %s, %s is gone", volumeID, st.StagingPath)
 		stopScope(ctx, volumeID)
 		if err := os.RemoveAll(volumeDir(volumeID)); err != nil {
@@ -244,9 +239,32 @@ func reconcileVolume(ctx context.Context, volumeID string, logLive bool) {
 			changed = true
 		}
 	}
+	// Kubelet removed them without unstaging or unpublishing, or the plugin
+	// crashed between mounting and recording the first user
+	for user := range st.Users {
+		if mountStatus(user) == mountGone {
+			delete(st.Users, user)
+			changed = true
+		}
+	}
+	if len(st.Users) == 0 {
+		klog.Infof("unmounting volume %s, nothing uses it", volumeID)
+		if err := unmount(ctx, volumeID, st.StagingPath); err != nil {
+			klog.Errorf("unmounting volume %s: %v", volumeID, err)
+		}
+		return
+	}
 	if changed {
 		if err := saveState(st); err != nil {
 			klog.Errorf("saving state of volume %s: %v", volumeID, err)
 		}
 	}
+}
+
+func remount(ctx context.Context, st volumeState) error {
+	if err := lazyUnmount(st.StagingPath); err != nil {
+		return err
+	}
+	stopScope(ctx, st.VolumeID)
+	return startRclone(ctx, st)
 }

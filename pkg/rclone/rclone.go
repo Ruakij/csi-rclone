@@ -22,7 +22,7 @@ import (
 	"k8s.io/utils/keymutex"
 )
 
-// StateDir holds a directory per staged volume with its rclone config, rc socket and VFS cache.
+// StateDir holds a directory per rclone mount with its mount point, config, rc socket and VFS cache.
 var StateDir = "/var/lib/csi-rclone"
 
 // volumeDir is named by a hash, because volume IDs may contain any character
@@ -36,20 +36,25 @@ func rcSocket(volumeID string) string {
 	return filepath.Join(volumeDir(volumeID), "rc.sock")
 }
 
-// volumeLocks serializes all node calls per volume. Kubelet retries a slow
+// volumeLocks serializes all node calls per rclone mount. Kubelet retries a slow
 // stage while the first one is still mounting.
 var volumeLocks = keymutex.NewHashed(0)
 
 func lockVolume(volumeID string)   { volumeLocks.LockKey(volumeID) }
 func unlockVolume(volumeID string) { _ = volumeLocks.UnlockKey(volumeID) }
 
-// volumeState is everything a later plugin instance needs to mount a volume
-// again. Kubelet only passes secrets and volume context to NodeStageVolume.
+// volumeState is everything a later plugin instance needs to mount an rclone
+// mount again. Kubelet only passes secrets and volume context to NodeStageVolume.
 type volumeState struct {
-	VolumeID    string   `json:"volumeID"`
+	// VolumeID names the mount, see mountID
+	VolumeID string `json:"volumeID"`
+	// StagingPath is where rclone is mounted
 	StagingPath string   `json:"stagingPath"`
 	Args        []string `json:"args"`
 	Env         []string `json:"env"`
+	// Users are the kubelet staging paths of persistent volumes and the targets
+	// of ephemeral volumes on this mount. The last one to leave unmounts it.
+	Users map[string]struct{} `json:"users,omitempty"`
 	// Targets maps each publish target to whether it is bound read-only
 	Targets map[string]bool `json:"targets,omitempty"`
 	// Mounted tells an rclone that exited cleanly apart from a mount that never came up
@@ -86,13 +91,47 @@ func saveState(st volumeState) error {
 }
 
 func loadState(volumeID string) (volumeState, error) {
+	return readState(statePath(volumeID))
+}
+
+func readState(file string) (volumeState, error) {
 	var st volumeState
-	data, err := os.ReadFile(statePath(volumeID))
-	if err != nil {
-		return st, err
+	data, err := os.ReadFile(file)
+	if err == nil {
+		err = json.Unmarshal(data, &st)
 	}
-	err = json.Unmarshal(data, &st)
+	// 4.0.0 mounted rclone at the kubelet staging path, its only user
+	if err == nil && st.Users == nil && st.StagingPath != mountPath(st.VolumeID) {
+		st.Users = map[string]struct{}{st.StagingPath: {}}
+	}
 	return st, err
+}
+
+// mountPath is where rclone is mounted, and bound from into staging and target paths.
+func mountPath(volumeID string) string {
+	return filepath.Join(volumeDir(volumeID), "mnt")
+}
+
+func (st volumeState) uses(path string) bool {
+	_, user := st.Users[path]
+	_, target := st.Targets[path]
+	return user || target
+}
+
+// lockMountOf finds the mount that path uses or is bound from, and returns it locked.
+func lockMountOf(path string) (volumeState, bool) {
+	for _, found := range loadStates() {
+		if !found.uses(path) {
+			continue
+		}
+		lockVolume(found.VolumeID)
+		// Reloaded under the lock, path may have left meanwhile
+		if st, err := loadState(found.VolumeID); err == nil && st.uses(path) {
+			return st, true
+		}
+		unlockVolume(found.VolumeID)
+	}
+	return volumeState{}, false
 }
 
 // loadStates skips unreadable files, so one of them cannot keep every other volume from being repaired.
@@ -104,13 +143,9 @@ func loadStates() []volumeState {
 	}
 	var states []volumeState
 	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(StateDir, e.Name(), "state.json"))
+		st, err := readState(filepath.Join(StateDir, e.Name(), "state.json"))
 		if os.IsNotExist(err) {
 			continue
-		}
-		var st volumeState
-		if err == nil {
-			err = json.Unmarshal(data, &st)
 		}
 		if err != nil {
 			klog.Errorf("skipping state of %s: %v", e.Name(), err)
@@ -119,26 +154,6 @@ func loadStates() []volumeState {
 		states = append(states, st)
 	}
 	return states
-}
-
-// updateTargets records a publish target, or forgets it when readOnly is nil.
-func updateTargets(volumeID, target string, readOnly *bool) error {
-	st, err := loadState(volumeID)
-	if err != nil {
-		return err
-	}
-	if readOnly == nil {
-		if _, ok := st.Targets[target]; !ok {
-			return nil
-		}
-		delete(st.Targets, target)
-	} else {
-		if st.Targets == nil {
-			st.Targets = map[string]bool{}
-		}
-		st.Targets[target] = *readOnly
-	}
-	return saveState(st)
 }
 
 // Mount starts rclone for a volume at its staging path.

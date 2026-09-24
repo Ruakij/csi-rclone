@@ -73,6 +73,7 @@ spec:
             {{- with .Values.allowedEndpoints }}
             - --allowed-endpoints={{ join "," . }}
             {{- end }}
+            - --reuse-mounts={{ .Values.reuseMounts }}
             {{- if .Values.unrestrictedRcloneOptions }}
             - --unrestricted-rclone-options
             {{- end }}
@@ -93,8 +94,10 @@ spec:
             - name: staging-dir
               mountPath: {{ $kubelet }}/plugins/kubernetes.io/csi
               mountPropagation: Bidirectional
+            # rclone mounts here, and the mounts are bound into pods
             - name: state-dir
               mountPath: /var/lib/csi-rclone
+              mountPropagation: Bidirectional
             {{- if ne .Values.daemonLifetime "in-container" }}
             - name: systemd
               mountPath: /run/systemd

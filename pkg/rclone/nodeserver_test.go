@@ -39,3 +39,32 @@ func TestExtractFlagsSkipsKubernetesKeys(t *testing.T) {
 		t.Errorf("extractFlags() = %v, %v", flags, err)
 	}
 }
+
+func TestMountID(t *testing.T) {
+	id := func(volumeID string, context, secrets map[string]string) string {
+		t.Helper()
+		a, err := ephemeralArgs(&csi.NodePublishVolumeRequest{VolumeContext: context, Secrets: secrets, VolumeCapability: &csi.VolumeCapability{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mountID(volumeID, a)
+	}
+	base := map[string]string{"remote": "s3", "remotePath": "bucket", ephemeralContextKey: "true", "csi.storage.k8s.io/pod.name": "a"}
+	creds := map[string]string{"s3-access-key-id": "key"}
+	shared := id("a", base, creds)
+	if got := id("b", map[string]string{"remote": "s3", "remotePath": "bucket", "s3-access-key-id": "key"}, nil); got != shared {
+		t.Errorf("same arguments: %s != %s", got, shared)
+	}
+	if got := id("a", base, map[string]string{"s3-access-key-id": "other"}); got == shared {
+		t.Error("different credentials share the mount")
+	}
+	if got := id("a", map[string]string{"remote": "s3", "remotePath": "other"}, creds); got == shared {
+		t.Error("different remotePath shares the mount")
+	}
+
+	ReuseMounts = false
+	t.Cleanup(func() { ReuseMounts = true })
+	if got := id("a", base, creds); got != "a" {
+		t.Errorf("unshared ID = %s, want a", got)
+	}
+}
