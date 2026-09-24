@@ -20,6 +20,12 @@ func lazyUnmount(path string) error {
 	switch err := unix.Unmount(path, unix.MNT_DETACH); err {
 	case nil, unix.EINVAL, unix.ENOENT:
 		return nil
+	case unix.EPERM:
+		// Unprivileged callers get EPERM for paths that are not mounted, too
+		if s := mountStatus(path); s != mountLive && s != mountDead {
+			return nil
+		}
+		return fmt.Errorf("unmount %s: %w", path, err)
 	default:
 		return fmt.Errorf("unmount %s: %w", path, err)
 	}
