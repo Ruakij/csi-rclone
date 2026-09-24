@@ -52,6 +52,8 @@ type volumeState struct {
 	Env         []string `json:"env"`
 	// Targets maps each publish target to whether it is bound read-only
 	Targets map[string]bool `json:"targets,omitempty"`
+	// Mounted tells an rclone that exited cleanly apart from a mount that never came up
+	Mounted bool `json:"mounted,omitempty"`
 }
 
 func statePath(volumeID string) string {
@@ -219,7 +221,8 @@ func Mount(ctx context.Context, volumeID string, remote string, remotePath strin
 		_ = os.Remove(statePath(volumeID))
 		return err
 	}
-	return nil
+	st.Mounted = true
+	return saveState(st)
 }
 
 const mountWaitTimeout = time.Minute
