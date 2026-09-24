@@ -5,13 +5,13 @@ This project implements Container Storage Interface (CSI) plugin that allows usi
 
 ## Kubernetes cluster compatability
 Works (tested):
-- `deploy/kubernetes/1.20`: K8S>= 1.20.x External provisioner requires kubernetes [1.20](https://github.com/kubernetes-csi/external-provisioner?tab=readme-ov-file#compatibility)+.
+- The Helm chart requires Kubernetes 1.25 or newer.
 - Older driver versions (before v3.0.0) support kubernetes 1.13-1.19, but are not maintained.
 
 ## Installing CSI driver to kubernetes cluster
 TLDR: `helm install csi-rclone oci://ghcr.io/ruakij/charts/csi-rclone --namespace csi-rclone --create-namespace`
 
-The chart can create `rclone-secret` (`rcloneSecret.create`, `rcloneSecret.stringData`) and a StorageClass (`storageClass.create`), and sets the node plugin flags below from its values, see [values.yaml](charts/csi-rclone/values.yaml). The manifests in `deploy/kubernetes/1.20` are an alternative to the chart.
+The chart can create `rclone-secret` (`rcloneSecret.create`, `rcloneSecret.stringData`) and a StorageClass (`storageClass.create`), and sets the node plugin flags below from its values, see [values.yaml](charts/csi-rclone/values.yaml).
 
 1. Set up storage backend. You can use [Minio](https://min.io/), Amazon S3 compatible cloud storage service.
 i.e (heads up - minio setup example is severly outdated). 
