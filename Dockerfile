@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags "-X github.com/Ruakij/csi-rclone/pkg/rclone.DriverVersion=${version}" \
     -o /out/csi-rclone-plugin ./cmd/csi-rclone-plugin
 
-FROM rclone/rclone:1.74.3@sha256:623378ad0ff3ebd5cebf77720843c0e02edfe46e2d5b5ac6bed54c6371780dfb AS rclone
+FROM rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5 AS rclone
 
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates bash fuse3 tini

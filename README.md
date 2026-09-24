@@ -141,7 +141,7 @@ The node plugin rejects volumes with rclone options that could read or write loc
 | `--allowed-endpoints` | any | Hosts that endpoint options may point at. Entries starting with `.` allow subdomains. |
 | `--unrestricted-rclone-options` | `false` | Allows every rclone option and backend. |
 
-`options_gen.go` is generated for the rclone version in the image: `rclone config providers | go run ./hack/gen-options v1.74.3 > pkg/rclone/options_gen.go`. Review the diff after an rclone update.
+`options_gen.go` is generated for the rclone version in the image: `rclone config providers | go run ./hack/gen-options v1.75.1 > pkg/rclone/options_gen.go`. Review the diff after an rclone update.
 
 ## Security
 

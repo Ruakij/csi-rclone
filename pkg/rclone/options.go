@@ -56,7 +56,7 @@ var mountFlags = set(
 )
 
 // Options holding a URL or host that rclone connects to
-var endpointOptions = set("endpoint", "url", "host", "auth", "storage_url", "download_url", "sas_url")
+var endpointOptions = set("endpoint", "url", "host", "auth", "storage_url", "download_url", "sas_url", "tenant_url")
 
 // wrapperOptions hold another remote, which must not be a local path
 var wrapperOptions = set("remote")

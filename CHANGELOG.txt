@@ -1,7 +1,7 @@
 # CHANGELOG
 
 Unreleased:
-  - rclone pinned to v1.74.3 by image digest.
+  - rclone pinned to v1.75.1 by image digest.
   - Node plugin RBAC reduced to `get` on `rclone-secret` in the `csi-rclone` namespace. Delete the old ClusterRole and ClusterRoleBinding `csi-nodeplugin-rclone` after upgrading.
   - Breaking: dynamic provisioning fails unless StorageClass `pathPattern` contains `${.PVC.namespace}` as a whole path segment, or the StorageClass sets `sharedRemote: "true"`. StorageClass parameters are immutable, so existing StorageClasses have to be recreated.
   - Breaking: volumes are mounted read-only for `readOnly: true`, `ReadOnlyMany` and `ro` in `mountOptions`.

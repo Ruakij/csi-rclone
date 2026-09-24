@@ -1,6 +1,6 @@
 // Command gen-options generates pkg/rclone/options_gen.go from `rclone config providers`.
 //
-//	rclone config providers | go run ./hack/gen-options v1.74.3 > pkg/rclone/options_gen.go
+//	rclone config providers | go run ./hack/gen-options v1.75.1 > pkg/rclone/options_gen.go
 //
 // Review the diff after an rclone update: options added to a backend are allowed unless deny matches them.
 package main
