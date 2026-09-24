@@ -12,6 +12,10 @@ updates:
         patterns: ["*"]
         exclude-patterns: ["k8s.io/*", "sigs.k8s.io/*"]
         update-types: [minor, patch]
+    ignore:
+      # Vulnerable to GO-2026-6443, which 1.83.2 is patched for
+      - dependency-name: google.golang.org/grpc
+        versions: ["1.84.0"]
 
   - package-ecosystem: github-actions
     directory: /
