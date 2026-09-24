@@ -219,16 +219,19 @@ func TestVolumes(t *testing.T) {
 		expect(t, "writer", "echo after > /data/after && cat /data/after", "after")
 	})
 
-	t.Run("a dead rclone is remounted", func(t *testing.T) {
-		if _, err := run("docker", "exec", node, "pkill", "-KILL", "-f", "^rclone mount"); err != nil {
-			t.Fatal(err)
-		}
-		// Running containers keep the dead mount, a new pod gets the remounted one.
-		create(t, pod("late", claim("data", false)))
-		t.Cleanup(func() { _ = deletePods(context.Background(), "late") })
-		ready(t, "late")
-		expect(t, "late", "cat /data/f", "hello")
-	})
+	// SIGKILL leaves a dead FUSE mount, SIGTERM makes rclone unmount before exiting.
+	for _, sig := range []string{"KILL", "TERM"} {
+		t.Run("rclone is remounted after SIG"+sig, func(t *testing.T) {
+			if _, err := run("docker", "exec", node, "pkill", "-"+sig, "-f", "^rclone mount"); err != nil {
+				t.Fatal(err)
+			}
+			// Running containers keep the dead mount, a new pod gets the remounted one.
+			create(t, pod("late", claim("data", false)))
+			t.Cleanup(func() { _ = deletePods(context.Background(), "late") })
+			ready(t, "late")
+			expect(t, "late", "cat /data/f", "hello")
+		})
+	}
 
 	t.Run("unstaging leaves nothing behind", func(t *testing.T) {
 		if err := deletePods(t.Context(), "writer", "late"); err != nil {

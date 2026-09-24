@@ -196,12 +196,16 @@ func reconcileVolume(ctx context.Context, volumeID string, logLive bool) {
 		return
 	}
 
-	switch mountStatus(st.StagingPath) {
+	switch s := mountStatus(st.StagingPath); s {
 	case mountLive:
 		if logLive {
 			klog.Infof("found live mount of volume %s at %s", volumeID, st.StagingPath)
 		}
-	case mountDead:
+	case mountDead, mountOther:
+		// rclone unmounts when stopped with SIGTERM, leaving a plain directory
+		if s == mountOther && !st.Mounted {
+			return
+		}
 		klog.Warningf("rclone for volume %s died, remounting %s", volumeID, st.StagingPath)
 		if err := lazyUnmount(st.StagingPath); err != nil {
 			klog.Errorf("remounting volume %s: %v", volumeID, err)
@@ -219,9 +223,6 @@ func reconcileVolume(ctx context.Context, volumeID string, logLive bool) {
 		if err := os.RemoveAll(volumeDir(volumeID)); err != nil {
 			klog.Errorf("removing state of volume %s: %v", volumeID, err)
 		}
-		return
-	default:
-		// Being mounted, or a node reboot, after which kubelet stages again
 		return
 	}
 
