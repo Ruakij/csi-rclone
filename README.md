@@ -9,7 +9,9 @@ Works (tested):
 - Older driver versions (before v3.0.0) support kubernetes 1.13-1.19, but are not maintained.
 
 ## Installing CSI driver to kubernetes cluster
-TLDR: `kubectl apply -f deploy/kubernetes/1.20`
+TLDR: `helm install csi-rclone oci://ghcr.io/ruakij/charts/csi-rclone --namespace csi-rclone --create-namespace`
+
+The chart can create `rclone-secret` (`rcloneSecret.create`, `rcloneSecret.stringData`) and a StorageClass (`storageClass.create`), and sets the node plugin flags below from its values, see [values.yaml](charts/csi-rclone/values.yaml). The manifests in `deploy/kubernetes/1.20` are an alternative to the chart.
 
 1. Set up storage backend. You can use [Minio](https://min.io/), Amazon S3 compatible cloud storage service.
 i.e (heads up - minio setup example is severly outdated). 
@@ -150,21 +152,17 @@ The node plugin rejects volumes with rclone options that could read or write loc
 - The node plugin uses `hostPID` and the host systemd D-Bus socket to start rclone scopes, which is host root as well.
 - `/var/lib/csi-rclone` on each node holds every staged volume's rclone config and flags, including credentials, readable only by root.
 
-## Building plugin and creating image
-Current code is referencing projects repository on github.com. If you fork the repository, you have to change go includes in several places (use search and replace).
+## Development
 
-
-1. First push the changed code to remote. The build will use paths from `pkg/` directory.
-
-2. Build the plugin via multistage build and create docker image. `VERSION` file will be used as image tag.
 ```
-make build
+git config core.hooksPath .githooks  # gofmt, go mod tidy, vet, tests, golangci-lint and helm lint before each commit
+go test ./...                         # unit tests, and the csi-test sanity suite on Linux
+make e2e                              # chart on a kind cluster, needs docker, kind, kubectl and helm; E2E_KEEP=1 keeps the cluster
+make build                            # image tagged with the version in VERSION
 ```
 
-3. Change docker.io account in `Makefile` and use `make push` to push the image to remote. 
-``` 
-make push
-```
+Pushing a tag `vX.Y.Z` publishes the image to `ghcr.io/ruakij/csi-rclone`, the chart to `oci://ghcr.io/ruakij/charts` and a GitHub release. Tags with a `-` suffix are prereleases.
+
 ## Changelog
 
 See [CHANGELOG.txt](CHANGELOG.txt)

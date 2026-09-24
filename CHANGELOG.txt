@@ -13,6 +13,8 @@ Unreleased:
   - Upgrading still loses all mounts once, because the previous release runs rclone inside its container. Drain nodes or restart the workloads.
   - rclone remote control runs on a unix socket instead of a localhost TCP port. Config files from `configData` are deleted on unmount.
   - Breaking: rclone backends and options are limited to an allow-list, see "rclone option allow-list" in the README. New flags `--allowed-backends`, `--allowed-endpoints` and `--unrestricted-rclone-options`.
+  - Helm chart, published to `oci://ghcr.io/ruakij/charts/csi-rclone`. Images are published to `ghcr.io/ruakij/csi-rclone` for amd64 and arm64.
+  - The controller validates requests and implements ValidateVolumeCapabilities.
 
 3.1.0:
   - Rclone binary update to v1.74.3
