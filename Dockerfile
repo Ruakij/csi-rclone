@@ -1,25 +1,23 @@
-####
-FROM golang:1.27-alpine AS builder
-RUN apk update && apk add --no-cache git make bash
-WORKDIR $GOPATH/src/csi-rclone-nodeplugin
+# Cross-compiling from the build platform, so a multi-arch build needs no
+# emulated toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+ARG TARGETARCH
+ARG version=dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN make plugin
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags "-X github.com/wunderio/csi-rclone/pkg/rclone.DriverVersion=${version}" \
+    -o /out/csi-rclone-plugin ./cmd/csi-rclone-plugin
 
 FROM rclone/rclone:1.74.3@sha256:623378ad0ff3ebd5cebf77720843c0e02edfe46e2d5b5ac6bed54c6371780dfb AS rclone
 
-####
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates bash fuse3 tini
 
 COPY --from=rclone /usr/local/bin/rclone /usr/bin/rclone
-
-# Use pre-compiled version (with cirectory marker patch)
-# https://github.com/rclone/rclone/pull/5323
-# COPY bin/rclone /usr/bin/rclone
-# RUN chmod 755 /usr/bin/rclone \
-#     && chown root:root /usr/bin/rclone
-
-COPY --from=builder /go/src/csi-rclone-nodeplugin/_output/csi-rclone-plugin /bin/csi-rclone-plugin
+COPY --from=build /out/csi-rclone-plugin /bin/csi-rclone-plugin
 
 ENTRYPOINT [ "/sbin/tini", "-s", "--"]
 CMD ["/bin/csi-rclone-plugin"]
