@@ -1,5 +1,9 @@
 version: "2"
 
+run:
+  # The e2e test is linted too, even though only its own CI job runs it.
+  build-tags: [e2e]
+
 linters:
   enable:
     - bodyclose
