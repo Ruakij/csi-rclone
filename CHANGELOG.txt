@@ -1,6 +1,6 @@
 # CHANGELOG
 
-Unreleased:
+4.1.0:
   - Ephemeral inline volumes, see "Ephemeral volumes" in the README. `rclone-secret` is not applied to them.
   - A volume reuses the running rclone mount of any other volume on the node whose rclone arguments match exactly, credentials included, unless `--reuse-mounts=false`. rclone mounts under `/var/lib/csi-rclone` instead of the kubelet staging path. Volumes mounted by 4.0.0 stay where they are until unstaged.
   - The CSIDriver's `volumeLifecycleModes` is immutable: delete the CSIDriver `csi-rclone` before upgrading, or set `ephemeralVolumes: false`.
