@@ -1,0 +1,2 @@
+# grpc-go in rclone 1.75.1: only crashes xDS gRPC servers (xds.NewGRPCServer), rclone uses grpc as a client.
+CVE-2026-84445 exp:2026-12-31
