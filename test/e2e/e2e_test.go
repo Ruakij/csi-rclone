@@ -28,7 +28,7 @@ const (
 	ns       = "e2e"
 	image    = "csi-rclone"
 	busybox  = "busybox:1.37"
-	rclone   = "rclone/rclone:1.74.3"
+	rclone   = "rclone/rclone:1.75.1"
 	release  = "csi-rclone"
 	repoRoot = "../.."
 )

@@ -83,4 +83,7 @@ func TestValidateOptionsSettings(t *testing.T) {
 	if validateOptions("sftp", "", map[string]string{"sftp-host": "10.0.0.1"}) == nil {
 		t.Error("sftp host not checked")
 	}
+	if validateOptions("onedrive", "", map[string]string{"onedrive-tenant-url": "https://10.0.0.1/_api"}) == nil {
+		t.Error("onedrive tenant_url not checked")
+	}
 }
