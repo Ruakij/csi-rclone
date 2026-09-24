@@ -89,6 +89,9 @@ func (cs *controllerServer) getPVC(ctx context.Context, name, namespace string) 
 }
 
 func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	if err := validateCapabilities(req.GetName(), req.GetVolumeCapabilities()); err != nil {
+		return nil, err
+	}
 	// Parse the request to get the volume name, size, and parameters.
 	volumeName := req.GetName()
 	capacityBytes := req.GetCapacityRange().GetRequiredBytes()
@@ -179,8 +182,37 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}, nil
 }
 
-func (cs *controllerServer) DeleteVolume(_ context.Context, _ *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
+func (cs *controllerServer) DeleteVolume(_ context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
+	}
 	return &csi.DeleteVolumeResponse{}, nil
+}
+
+func (cs *controllerServer) ValidateVolumeCapabilities(_ context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
+	caps := req.GetVolumeCapabilities()
+	if err := validateCapabilities(req.GetVolumeId(), caps); err != nil {
+		return nil, err
+	}
+	for _, c := range caps {
+		if c.GetMount() == nil {
+			return &csi.ValidateVolumeCapabilitiesResponse{Message: "only filesystem volumes are supported"}, nil
+		}
+	}
+	return &csi.ValidateVolumeCapabilitiesResponse{
+		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
+			VolumeContext:      req.GetVolumeContext(),
+			VolumeCapabilities: caps,
+			Parameters:         req.GetParameters(),
+		},
+	}, nil
+}
+
+func validateCapabilities(id string, caps []*csi.VolumeCapability) error {
+	if id == "" || len(caps) == 0 {
+		return status.Error(codes.InvalidArgument, "volume name or ID and volume capabilities are required")
+	}
+	return nil
 }
 
 func (cs *controllerServer) ControllerGetCapabilities(_ context.Context, _ *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
