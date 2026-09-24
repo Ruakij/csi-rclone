@@ -1,4 +1,4 @@
-module github.com/wunderio/csi-rclone
+module github.com/Ruakij/csi-rclone
 
 go 1.27.1
 
