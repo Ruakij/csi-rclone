@@ -1,0 +1,125 @@
+# Versions that live in files Dependabot cannot parse: the golangci-lint version in
+# hack/golangci-lint.version and the CSI sidecar image tags in the chart's
+# values.yaml. This bumps them and opens a PR per upstream.
+#
+# AUTOMATION_SSH_KEY is an optional repository secret holding the private half of a
+# deploy key with write access. With it, the branch is pushed over SSH rather than as
+# GITHUB_TOKEN, which is what lets ci.yaml run on the automation/** push. Without it
+# checkout falls back to the token and the PR opens with no checks.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+
+  golangci-lint:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: upstream-sync-golangci-lint
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ssh-key: ${{ secrets.AUTOMATION_SSH_KEY }}
+
+      - id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(cat hack/golangci-lint.version)
+          latest=$(gh release view --repo golangci/golangci-lint --json tagName -q .tagName)
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          [ "${current}" = "${latest}" ] && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - if: steps.detect.outputs.changed == 'true'
+        run: echo "${{ steps.detect.outputs.latest }}" > hack/golangci-lint.version
+
+      # A new release usually means new checks, so let the PR say whether we pass.
+      - if: steps.detect.outputs.changed == 'true'
+        id: lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ steps.detect.outputs.latest }}
+
+      - if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.AUTOMATION_PR_TOKEN != '' && secrets.AUTOMATION_PR_TOKEN || github.token }}
+          branch: automation/golangci-lint-version-sync
+          delete-branch: true
+          commit-message: "Bump golangci-lint to ${{ steps.detect.outputs.latest }}"
+          title: "Bump golangci-lint to ${{ steps.detect.outputs.latest }}"
+          body: |
+            Automated golangci-lint upstream sync.
+
+            - Previous: `${{ steps.detect.outputs.current }}`
+            - New: `${{ steps.detect.outputs.latest }}`
+
+            Result of running the new version against the tree: `${{ steps.lint.outcome }}`.
+            A failure here is expected when a release adds checks; the findings are in the
+            job log of the run that opened this PR.
+
+  sidecar:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: registrar
+            repo: kubernetes-csi/node-driver-registrar
+          - key: provisioner
+            repo: kubernetes-csi/external-provisioner
+          - key: attacher
+            repo: kubernetes-csi/external-attacher
+    concurrency:
+      group: upstream-sync-${{ matrix.key }}
+      cancel-in-progress: true
+    env:
+      VALUES: charts/csi-rclone/values.yaml
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ssh-key: ${{ secrets.AUTOMATION_SSH_KEY }}
+
+      # Sorted rather than "latest": upstream also cuts patch releases for older
+      # minors, which GitHub may flag as the latest release.
+      - id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(sed -n '/^${{ matrix.key }}:/,/^[^ ]/ s/^    tag: //p' "$VALUES")
+          latest=$(gh release list --repo ${{ matrix.repo }} --exclude-pre-releases --exclude-drafts --limit 30 --json tagName -q '.[].tagName' | sort -V | tail -1)
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          [ -n "${latest}" ] && [ "$(printf '%s\n' "${current}" "${latest}" | sort -V | tail -1)" != "${current}" ] && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
+
+      - if: steps.detect.outputs.changed == 'true'
+        run: |
+          sed -i '/^${{ matrix.key }}:/,/^[^ ]/ s/^\(    tag: \).*/\1${{ steps.detect.outputs.latest }}/' "$VALUES"
+
+      - if: steps.detect.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.AUTOMATION_PR_TOKEN != '' && secrets.AUTOMATION_PR_TOKEN || github.token }}
+          branch: automation/${{ matrix.key }}-version-sync
+          delete-branch: true
+          commit-message: "Bump ${{ matrix.repo }} to ${{ steps.detect.outputs.latest }}"
+          title: "Bump ${{ matrix.repo }} to ${{ steps.detect.outputs.latest }}"
+          body: |
+            Automated CSI sidecar upstream sync.
+
+            - Previous: `${{ steps.detect.outputs.current }}`
+            - New: `${{ steps.detect.outputs.latest }}`
+
+            The `e2e` job runs the chart with the new image in kind.
