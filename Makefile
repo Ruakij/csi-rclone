@@ -17,7 +17,7 @@ REGISTRY_NAME=ghcr.io/ruakij
 IMAGE_NAME=csi-rclone
 IMAGE_TAG=$(REGISTRY_NAME)/$(IMAGE_NAME):$(VERSION)
 
-.PHONY: all clean
+.PHONY: all clean e2e
 
 all: build push
 
@@ -34,3 +34,6 @@ push:
 clean:
 	go clean -r -x
 	-rm -rf _output
+
+e2e:
+	go test -tags e2e -count=1 -timeout 30m -v ./test/e2e
