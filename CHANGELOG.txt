@@ -1,6 +1,6 @@
 # CHANGELOG
 
-Unreleased:
+4.1.1:
   - rclone v1.75.2, Go 1.27.2.
 
 4.1.0:
