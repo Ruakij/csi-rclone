@@ -278,7 +278,7 @@ files, run commands, reach local sockets or use the node's cloud identity. It al
   connection string or other `crypt` remote.
 
 `options_gen.go` is generated for the rclone version in the image:
-`rclone config providers | go run ./hack/gen-options v1.75.1 > pkg/rclone/options_gen.go`.
+`rclone config providers | go run ./hack/gen-options v1.75.2 > pkg/rclone/options_gen.go`.
 Review the diff after an rclone update.
 
 ### Chart values

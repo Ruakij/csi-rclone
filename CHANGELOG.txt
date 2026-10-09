@@ -1,5 +1,8 @@
 # CHANGELOG
 
+Unreleased:
+  - rclone v1.75.2, Go 1.27.2.
+
 4.1.0:
   - Ephemeral inline volumes, see "Ephemeral volumes" in the README. `rclone-secret` is not applied to them.
   - A volume reuses the running rclone mount of any other volume on the node whose rclone arguments match exactly, credentials included, unless `--reuse-mounts=false`. rclone mounts under `/var/lib/csi-rclone` instead of the kubelet staging path. Volumes mounted by 4.0.0 stay where they are until unstaged.
