@@ -1,31 +1,32 @@
 package rclone
 
 import (
-	"errors"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"path/filepath"
 	"reflect"
-	"regexp"
-	"syscall"
 	"testing"
+
+	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/scope"
 )
 
-func TestClassifyMount(t *testing.T) {
-	for _, tc := range []struct {
-		fsType int64
-		err    error
-		want   mountState
-	}{
-		{fuseSuperMagic, nil, mountLive},
-		{0xEF53, nil, mountOther},
-		{0, syscall.ENOTCONN, mountDead},
-		{0, syscall.ENOENT, mountGone},
-		{0, syscall.EACCES, mountOther},
-		{fuseSuperMagic, errors.New("other"), mountOther},
-	} {
-		if got := classifyMount(tc.fsType, tc.err); got != tc.want {
-			t.Errorf("classifyMount(%#x, %v) = %v, want %v", tc.fsType, tc.err, got, tc.want)
-		}
+// inContainer keeps rclone in the process of the test, which has no host systemd.
+func inContainer(t *testing.T) {
+	t.Helper()
+	old := DaemonLifetime
+	DaemonLifetime = "in-container"
+	t.Cleanup(func() { DaemonLifetime = old })
+}
+
+func newTestMounts(t *testing.T) *mounts {
+	t.Helper()
+	inContainer(t)
+	m, err := newMounts(t.Context())
+	if err != nil {
+		t.Fatal(err)
 	}
+	return m
 }
 
 func TestState(t *testing.T) {
@@ -46,14 +47,15 @@ func TestState(t *testing.T) {
 		t.Errorf("state file: %v, %v", fi, err)
 	}
 
+	m := newTestMounts(t)
 	for _, path := range []string{"/staging", "/t"} {
-		st, ok := lockMountOf(path)
+		st, ok := m.lockMountOf(path)
 		if !ok || st.VolumeID != id {
 			t.Fatalf("lockMountOf(%s) = %v, %v", path, st.VolumeID, ok)
 		}
-		unlockVolume(id)
+		m.sup.Unlock(id)
 	}
-	if _, ok := lockMountOf("/other"); ok {
+	if _, ok := m.lockMountOf("/other"); ok {
 		t.Error("lockMountOf(/other) found a mount")
 	}
 }
@@ -72,9 +74,68 @@ func TestLegacyState(t *testing.T) {
 	}
 }
 
-func TestScopeName(t *testing.T) {
-	name := scopeName("pvc-1/../x y")
-	if !regexp.MustCompile(`^csi-rclone-[0-9a-f]{16}\.scope$`).MatchString(name) || name != scopeName("pvc-1/../x y") || name == scopeName("pvc-2") {
-		t.Errorf("scopeName = %q", name)
+// The names of scopes and state files are how a new node plugin finds the rclone
+// processes of the old one, so they are pinned to what earlier releases wrote: the
+// reference functions and the literals below are theirs.
+var compatIDs = map[string]string{
+	"pv":                   "0717031b935f131e",
+	"pvc-1/with:odd chars": "487013acf7c4cc7e",
+	"e2e-shared":           "513b83f92617d9f4",
+	"0b8e5c7a9d3f41e2a6b0c8d7e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6": "d9bfa789cf39e28e",
+	"": "e3b0c44298fc1c14",
+}
+
+func legacyVolumeDir(volumeID string) string {
+	sum := sha256.Sum256([]byte(volumeID))
+	return filepath.Join(StateDir, hex.EncodeToString(sum[:8]))
+}
+
+func legacyScopeName(volumeID string) string {
+	return "csi-rclone-" + filepath.Base(legacyVolumeDir(volumeID)) + ".scope"
+}
+
+func legacyStatePath(volumeID string) string {
+	return filepath.Join(legacyVolumeDir(volumeID), "state.json")
+}
+
+func TestScopeNameCompat(t *testing.T) {
+	StateDir = t.TempDir()
+	cfg := scopeConfig(scope.InContainer)
+	m, err := scope.New(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, hash := range compatIDs {
+		got, err := m.Unit(id)
+		want := "csi-rclone-" + hash + ".scope"
+		if err != nil || got != want || got != legacyScopeName(id) {
+			t.Errorf("scope of %q = %q, %v; want %q, legacy %q", id, got, err, want, legacyScopeName(id))
+		}
+	}
+	if cfg.Description != "csi-rclone mount" {
+		t.Errorf("scope description = %q", cfg.Description)
+	}
+}
+
+func TestStateLayoutCompat(t *testing.T) {
+	StateDir = t.TempDir()
+	store := stateStore()
+	for id, hash := range compatIDs {
+		if got, want := store.Path(id), filepath.Join(StateDir, hash, "state.json"); got != want || got != legacyStatePath(id) {
+			t.Errorf("state path of %q = %q, want %q, legacy %q", id, got, want, legacyStatePath(id))
+		}
+	}
+
+	// A state file written the way earlier releases wrote it is found by the glob.
+	const id = "pvc-1/with:odd chars"
+	if err := os.MkdirAll(legacyVolumeDir(id), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"volumeID":"` + id + `","stagingPath":"/kubelet/globalmount","users":{"/kubelet/globalmount":{}},"mounted":true}`
+	if err := os.WriteFile(legacyStatePath(id), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if states := loadStates(); len(states) != 1 || states[0].VolumeID != id || !states[0].Mounted {
+		t.Errorf("loadStates() = %+v", states)
 	}
 }

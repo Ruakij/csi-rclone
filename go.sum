@@ -1,5 +1,7 @@
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
+github.com/Ruakij/go-csi-fuse-supervisor v0.1.0 h1:kH0PpVIDIDjOA/ToaCqkNGibpEduHWHq6KFYLZ5dtgY=
+github.com/Ruakij/go-csi-fuse-supervisor v0.1.0/go.mod h1:emfWmX4haYN7qH6736JAlFXG+bT15PF5c2B71Z8ncr0=
 github.com/container-storage-interface/spec v1.13.0 h1:6ja3nYoACisewTPAAZkJ1pbf4+1ehhvt9Z/nYgWGHGw=
 github.com/container-storage-interface/spec v1.13.0/go.mod h1:fPZ7EFHYJwIwc9CMcoaT/yIhFTdToocYVtyafMG7EDM=
 github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=

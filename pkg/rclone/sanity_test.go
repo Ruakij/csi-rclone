@@ -22,7 +22,11 @@ func TestSanity(t *testing.T) {
 	StateDir = filepath.Join(dir, "state")
 	sock := filepath.Join(dir, "csi.sock")
 
-	d := NewDriver("node", "unix://"+sock)
+	inContainer(t)
+	d, err := NewDriver("node", "unix://"+sock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	go serve(d.endpoint, d, d.cs, d.ns)
 
 	cfg := sanity.NewTestConfig()

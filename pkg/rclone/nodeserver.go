@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
+
+	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/fusemount"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +31,7 @@ const ephemeralContextKey = "csi.storage.k8s.io/ephemeral"
 type nodeServer struct {
 	csi.UnimplementedNodeServer
 	Driver *Driver
+	*mounts
 }
 
 func (ns *nodeServer) NodeGetInfo(_ context.Context, _ *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
@@ -50,8 +55,8 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		return nil, status.Error(codes.InvalidArgument, "volume ID, staging target path and volume capability are required")
 	}
 	// Staged already, reconcile repairs a dead mount
-	if st, ok := lockMountOf(stagingPath); ok {
-		unlockVolume(st.VolumeID)
+	if st, ok := ns.lockMountOf(stagingPath); ok {
+		ns.sup.Unlock(st.VolumeID)
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -70,9 +75,9 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 
 	id := mountID(volumeID, a)
-	lockVolume(id)
-	defer unlockVolume(id)
-	if _, err := acquire(ctx, id, a, stagingPath); err != nil {
+	ns.sup.Lock(id)
+	defer ns.sup.Unlock(id)
+	if _, err := ns.acquire(ctx, id, a, stagingPath); err != nil {
 		return nil, err
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
@@ -85,12 +90,12 @@ func (ns *nodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 		return nil, status.Error(codes.InvalidArgument, "volume ID and staging target path are required")
 	}
 
-	st, ok := lockMountOf(stagingPath)
+	st, ok := ns.lockMountOf(stagingPath)
 	if !ok {
 		return &csi.NodeUnstageVolumeResponse{}, nil
 	}
-	defer unlockVolume(st.VolumeID)
-	if err := release(ctx, st, stagingPath); err != nil {
+	defer ns.sup.Unlock(st.VolumeID)
+	if err := ns.release(ctx, st, stagingPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
@@ -115,11 +120,11 @@ func mountID(volumeID string, a rcloneArgs) string {
 }
 
 // acquire adds user to the rclone mount id, mounting it unless it is live. The caller holds the lock on id.
-func acquire(ctx context.Context, id string, a rcloneArgs, user string) (volumeState, error) {
+func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user string) (volumeState, error) {
 	st, err := loadState(id)
 	switch {
-	case os.IsNotExist(err):
-		if err := mountRclone(ctx, id, a); err != nil {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := m.mountRclone(ctx, id, a); err != nil {
 			return st, err
 		}
 		if st, err = loadState(id); err != nil {
@@ -127,8 +132,8 @@ func acquire(ctx context.Context, id string, a rcloneArgs, user string) (volumeS
 		}
 	case err != nil:
 		return st, status.Error(codes.Internal, err.Error())
-	case !isFUSEMount(st.StagingPath):
-		if err := remount(ctx, st); err != nil {
+	case !fusemount.IsFUSE(st.StagingPath):
+		if err := m.remount(ctx, st); err != nil {
 			return st, status.Error(codes.Internal, err.Error())
 		}
 		st.Mounted = true
@@ -143,12 +148,12 @@ func acquire(ctx context.Context, id string, a rcloneArgs, user string) (volumeS
 	return st, nil
 }
 
-func mountRclone(ctx context.Context, id string, a rcloneArgs) error {
+func (m *mounts) mountRclone(ctx context.Context, id string, a rcloneArgs) error {
 	// A dead FUSE mount from an rclone that exited
-	if err := lazyUnmount(mountPath(id)); err != nil {
+	if err := detach(mountPath(id)); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
-	e := Mount(ctx, id, a.remote, a.remotePath, mountPath(id), a.configData, a.flags, a.readOnly)
+	e := m.mount(ctx, id, a.remote, a.remotePath, mountPath(id), a.configData, a.flags, a.readOnly)
 	if e == nil {
 		return nil
 	}
@@ -162,21 +167,21 @@ func mountRclone(ctx context.Context, id string, a rcloneArgs) error {
 }
 
 // release removes user from the mount, and unmounts it once it has none. The caller holds the lock.
-func release(ctx context.Context, st volumeState, user string) error {
+func (m *mounts) release(ctx context.Context, st volumeState, user string) error {
 	delete(st.Users, user)
 	if len(st.Users) > 0 {
 		return saveState(st)
 	}
-	return unmount(ctx, st.VolumeID, st.StagingPath)
+	return m.unmount(ctx, st.VolumeID, st.StagingPath)
 }
 
 // unmount drains uploads, unmounts rclone and removes its state. The caller holds the lock.
-func unmount(ctx context.Context, id, mountPoint string) error {
+func (m *mounts) unmount(ctx context.Context, id, mountPoint string) error {
 	waitForUploads(id)
-	if err := lazyUnmount(mountPoint); err != nil {
+	if err := detach(mountPoint); err != nil {
 		return err
 	}
-	stopScope(ctx, id)
+	m.stopScope(ctx, id)
 	// Fails if still mounted, so RemoveAll cannot delete files on the remote
 	if mountPoint == mountPath(id) {
 		if err := os.Remove(mountPoint); err != nil && !os.IsNotExist(err) {
@@ -222,20 +227,20 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 			return nil, err
 		}
 		id := mountID(volumeID, a)
-		lockVolume(id)
-		defer unlockVolume(id)
-		if st, err = acquire(ctx, id, a, targetPath); err != nil {
+		ns.sup.Lock(id)
+		defer ns.sup.Unlock(id)
+		if st, err = ns.acquire(ctx, id, a, targetPath); err != nil {
 			return nil, err
 		}
 	} else {
 		var ok bool
-		if st, ok = lockMountOf(stagingPath); !ok {
+		if st, ok = ns.lockMountOf(stagingPath); !ok {
 			return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not staged at %s", volumeID, stagingPath)
 		}
-		defer unlockVolume(st.VolumeID)
+		defer ns.sup.Unlock(st.VolumeID)
 	}
 
-	if !isFUSEMount(st.StagingPath) {
+	if !fusemount.IsFUSE(st.StagingPath) {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s", volumeID, st.StagingPath)
 	}
 	// Recorded before binding, so reconcile can bind it again after rclone dies
@@ -247,17 +252,17 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if err := saveState(st); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if isFUSEMount(targetPath) {
+	if fusemount.IsFUSE(targetPath) {
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
-	if err := lazyUnmount(targetPath); err != nil {
+	if err := detach(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	if err := os.MkdirAll(targetPath, 0750); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if err := bindMount(st.StagingPath, targetPath, readOnly); err != nil {
+	if err := fusemount.Bind(st.StagingPath, targetPath, readOnly); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -271,11 +276,11 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 		return nil, status.Error(codes.InvalidArgument, "volume ID and target path are required")
 	}
 
-	st, ok := lockMountOf(targetPath)
+	st, ok := ns.lockMountOf(targetPath)
 	if ok {
-		defer unlockVolume(st.VolumeID)
+		defer ns.sup.Unlock(st.VolumeID)
 	}
-	if err := lazyUnmount(targetPath); err != nil {
+	if err := detach(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
@@ -288,7 +293,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	delete(st.Targets, targetPath)
 	var err error
 	if _, user := st.Users[targetPath]; user {
-		err = release(ctx, st, targetPath)
+		err = ns.release(ctx, st, targetPath)
 	} else {
 		err = saveState(st)
 	}

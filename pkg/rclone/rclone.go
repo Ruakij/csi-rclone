@@ -5,43 +5,38 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/state"
+	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/supervisor"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/keymutex"
 )
 
 // StateDir holds a directory per rclone mount with its mount point, config, rc socket and VFS cache.
 var StateDir = "/var/lib/csi-rclone"
 
-// volumeDir is named by a hash, because volume IDs may contain any character
+// volumeDirName is a hash, because volume IDs may contain any character
 // and the rc socket path has to stay short.
-func volumeDir(volumeID string) string {
+func volumeDirName(volumeID string) string {
 	sum := sha256.Sum256([]byte(volumeID))
-	return filepath.Join(StateDir, hex.EncodeToString(sum[:8]))
+	return hex.EncodeToString(sum[:8])
+}
+
+func volumeDir(volumeID string) string {
+	return filepath.Join(StateDir, volumeDirName(volumeID))
 }
 
 func rcSocket(volumeID string) string {
 	return filepath.Join(volumeDir(volumeID), "rc.sock")
 }
-
-// volumeLocks serializes all node calls per rclone mount. Kubelet retries a slow
-// stage while the first one is still mounting.
-var volumeLocks = keymutex.NewHashed(0)
-
-func lockVolume(volumeID string)   { volumeLocks.LockKey(volumeID) }
-func unlockVolume(volumeID string) { _ = volumeLocks.UnlockKey(volumeID) }
 
 // volumeState is everything a later plugin instance needs to mount an rclone
 // mount again. Kubelet only passes secrets and volume context to NodeStageVolume.
@@ -65,46 +60,30 @@ func statePath(volumeID string) string {
 	return filepath.Join(volumeDir(volumeID), "state.json")
 }
 
-// saveState writes atomically, so neither a crash nor a reconcile pass sees a half-written file.
+// stateStore is built per use, since StateDir is set after package initialization.
+// It writes atomically, so neither a crash nor a reconcile pass sees a half-written file.
+func stateStore() *state.Store[volumeState] {
+	return &state.Store[volumeState]{Path: statePath, Glob: filepath.Join(StateDir, "*", "state.json")}
+}
+
 func saveState(st volumeState) error {
-	data, err := json.Marshal(st)
-	if err != nil {
-		return err
-	}
-	final := statePath(st.VolumeID)
-	tmp := final + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, final)
+	return stateStore().Save(st.VolumeID, st)
 }
 
 func loadState(volumeID string) (volumeState, error) {
-	return readState(statePath(volumeID))
-}
-
-func readState(file string) (volumeState, error) {
-	var st volumeState
-	data, err := os.ReadFile(file)
+	st, err := stateStore().Load(volumeID)
 	if err == nil {
-		err = json.Unmarshal(data, &st)
-	}
-	// 4.0.0 mounted rclone at the kubelet staging path, its only user
-	if err == nil && st.Users == nil && st.StagingPath != mountPath(st.VolumeID) {
-		st.Users = map[string]struct{}{st.StagingPath: {}}
+		st.addLegacyUser()
 	}
 	return st, err
+}
+
+// addLegacyUser gives a state of 4.0.0 its user: that release mounted rclone at the
+// kubelet staging path, its only user.
+func (st *volumeState) addLegacyUser() {
+	if st.Users == nil && st.StagingPath != mountPath(st.VolumeID) {
+		st.Users = map[string]struct{}{st.StagingPath: {}}
+	}
 }
 
 // mountPath is where rclone is mounted, and bound from into staging and target paths.
@@ -119,45 +98,35 @@ func (st volumeState) uses(path string) bool {
 }
 
 // lockMountOf finds the mount that path uses or is bound from, and returns it locked.
-func lockMountOf(path string) (volumeState, bool) {
+func (m *mounts) lockMountOf(path string) (volumeState, bool) {
 	for _, found := range loadStates() {
 		if !found.uses(path) {
 			continue
 		}
-		lockVolume(found.VolumeID)
+		m.sup.Lock(found.VolumeID)
 		// Reloaded under the lock, path may have left meanwhile
 		if st, err := loadState(found.VolumeID); err == nil && st.uses(path) {
 			return st, true
 		}
-		unlockVolume(found.VolumeID)
+		m.sup.Unlock(found.VolumeID)
 	}
 	return volumeState{}, false
 }
 
 // loadStates skips unreadable files, so one of them cannot keep every other volume from being repaired.
 func loadStates() []volumeState {
-	entries, err := os.ReadDir(StateDir)
-	if err != nil {
-		klog.Errorf("reading %s: %v", StateDir, err)
-		return nil
+	states, errs := stateStore().LoadAll()
+	for _, err := range errs {
+		klog.Errorf("skipping state: %v", err)
 	}
-	var states []volumeState
-	for _, e := range entries {
-		st, err := readState(filepath.Join(StateDir, e.Name(), "state.json"))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			klog.Errorf("skipping state of %s: %v", e.Name(), err)
-			continue
-		}
-		states = append(states, st)
+	for i := range states {
+		states[i].addLegacyUser()
 	}
 	return states
 }
 
-// Mount starts rclone for a volume at its staging path.
-func Mount(ctx context.Context, volumeID string, remote string, remotePath string, stagingPath string, configData string, flags map[string]string, readOnly bool) error {
+// mount starts rclone for a volume at its staging path.
+func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remotePath string, stagingPath string, configData string, flags map[string]string, readOnly bool) error {
 	dir := volumeDir(volumeID)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -232,7 +201,7 @@ func Mount(ctx context.Context, volumeID string, remote string, remotePath strin
 	if err := saveState(st); err != nil {
 		return err
 	}
-	if err := startRclone(ctx, st); err != nil {
+	if err := m.startRclone(ctx, st); err != nil {
 		_ = os.Remove(statePath(volumeID))
 		return err
 	}
@@ -243,7 +212,7 @@ func Mount(ctx context.Context, volumeID string, remote string, remotePath strin
 const mountWaitTimeout = time.Minute
 
 // startRclone returns once rclone serves the staging path.
-func startRclone(ctx context.Context, st volumeState) error {
+func (m *mounts) startRclone(ctx context.Context, st volumeState) error {
 	logFile := filepath.Join(volumeDir(st.VolumeID), "rclone.log")
 	var logOffset int64
 	if fi, err := os.Stat(logFile); err == nil {
@@ -256,53 +225,17 @@ func startRclone(ctx context.Context, st volumeState) error {
 	klog.V(4).Infof("executing rclone %v", st.Args)
 	cmd := exec.Command("rclone", st.Args...)
 	cmd.Env = append(os.Environ(), st.Env...)
-	// rclone outlives the plugin, so it gets its own session and no pipes to
-	// the plugin: stdio is /dev/null, since writing to a closed pipe kills it with SIGPIPE.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting rclone: %w", err)
-	}
-	// Reaped only once adopted, so the scope cannot take a reused pid
-	if useSystemd() {
-		if err := adoptIntoScope(ctx, scopeName(st.VolumeID), cmd.Process.Pid); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			return err
-		}
-	}
-	exited := make(chan struct{})
-	go func() {
-		err := cmd.Wait()
-		klog.V(4).Infof("rclone for volume %s exited: %v", st.VolumeID, err)
-		close(exited)
-		requestReconcile()
-	}()
-
-	if err := waitMounted(ctx, st.StagingPath, exited); err != nil {
-		_ = cmd.Process.Kill()
+	// stdio stays /dev/null: rclone outlives the plugin, and writing to a pipe to it kills rclone with SIGPIPE
+	d, err := m.sup.Start(ctx, st.VolumeID, cmd, st.StagingPath, supervisor.StartOptions{
+		Timeout: mountWaitTimeout,
+		OnExit: func(err error) {
+			klog.V(4).Infof("rclone for volume %s exited: %v", st.VolumeID, err)
+		},
+	})
+	if err != nil {
 		return fmt.Errorf("mounting failed: %w, rclone log: %q", err, readLog(logFile, logOffset))
 	}
-	klog.V(4).Infof("mounted volume %s at %s (pid %d)", st.VolumeID, st.StagingPath, cmd.Process.Pid)
-	return nil
-}
-
-func waitMounted(ctx context.Context, path string, exited <-chan struct{}) error {
-	deadline := time.NewTimer(mountWaitTimeout)
-	defer deadline.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-
-	for !isFUSEMount(path) {
-		select {
-		case <-exited:
-			return fmt.Errorf("rclone exited before mounting %s", path)
-		case <-deadline.C:
-			return fmt.Errorf("%s was not mounted within %s", path, mountWaitTimeout)
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-tick.C:
-		}
-	}
+	klog.V(4).Infof("mounted volume %s at %s (pid %d)", st.VolumeID, st.StagingPath, d.Pid())
 	return nil
 }
 
@@ -322,34 +255,6 @@ func readLog(path string, offset int64) string {
 	}
 	data, _ := io.ReadAll(f)
 	return strings.TrimSpace(string(data))
-}
-
-type mountState int
-
-const (
-	mountOther mountState = iota
-	mountLive
-	mountDead
-	mountGone
-)
-
-const fuseSuperMagic = 0x65735546
-
-func classifyMount(fsType int64, statfsErr error) mountState {
-	switch {
-	case statfsErr == nil && fsType == fuseSuperMagic:
-		return mountLive
-	case errors.Is(statfsErr, syscall.ENOTCONN):
-		return mountDead
-	case errors.Is(statfsErr, fs.ErrNotExist):
-		return mountGone
-	default:
-		return mountOther
-	}
-}
-
-func isFUSEMount(path string) bool {
-	return mountStatus(path) == mountLive
 }
 
 // https://rclone.org/rc/#core-stats

@@ -75,11 +75,6 @@ Version:    %s
 }
 
 func handle() {
-	switch rclone.DaemonLifetime {
-	case "auto", "systemd", "in-container":
-	default:
-		klog.Fatalf("invalid --daemon-lifetime %q", rclone.DaemonLifetime)
-	}
 	if scopeMemoryMax != "" {
 		q, err := resource.ParseQuantity(scopeMemoryMax)
 		if err != nil || q.Sign() <= 0 {
@@ -87,6 +82,9 @@ func handle() {
 		}
 		rclone.ScopeMemoryMax = uint64(q.Value())
 	}
-	d := rclone.NewDriver(nodeID, endpoint)
+	d, err := rclone.NewDriver(nodeID, endpoint)
+	if err != nil {
+		klog.Fatalf("starting the driver: %v", err)
+	}
 	d.Run()
 }

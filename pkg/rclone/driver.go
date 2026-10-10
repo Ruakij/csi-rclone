@@ -22,17 +22,21 @@ var (
 	DriverVersion = "latest"
 )
 
-func NewDriver(nodeID, endpoint string) *Driver {
+func NewDriver(nodeID, endpoint string) (*Driver, error) {
 	klog.Infof("Starting new %s driver in version %s", DriverName, DriverVersion)
 
+	m, err := newMounts(context.Background())
+	if err != nil {
+		return nil, err
+	}
 	d := &Driver{nodeID: nodeID, endpoint: endpoint}
 	d.cs = &controllerServer{}
-	d.ns = &nodeServer{Driver: d}
-	return d
+	d.ns = &nodeServer{Driver: d, mounts: m}
+	return d, nil
 }
 
 func (d *Driver) Run() {
-	go reconcile(context.Background())
+	go d.ns.run(context.Background())
 	serve(d.endpoint, d, d.cs, d.ns)
 }
 
