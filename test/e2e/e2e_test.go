@@ -220,6 +220,33 @@ func TestVolumes(t *testing.T) {
 		expect(t, "writer", "echo after > /data/after && cat /data/after", "after")
 	})
 
+	t.Run("an rclone that does not answer is left alone", func(t *testing.T) {
+		pid := func() string {
+			out, _ := run("docker", "exec", node, "pgrep", "-f", "^rclone mount")
+			return out
+		}
+		signal := func(sig string) {
+			if _, err := run("docker", "exec", node, "pkill", "-"+sig, "-f", "^rclone mount"); err != nil {
+				t.Error(err)
+			}
+		}
+		before := pid()
+		if before == "" || strings.Contains(before, "\n") {
+			t.Fatalf("rclone pids %q, want one", before)
+		}
+		signal("STOP")
+		t.Cleanup(func() { signal("CONT") })
+		poll(t, 2*time.Minute, "the node plugin to report the stuck rclone", func(context.Context) (bool, error) {
+			out, _ := run("kubectl", "--context", kubeCtx, "-n", driverNS, "logs", "-l", "app.kubernetes.io/component=node", "-c", "rclone", "--tail=200")
+			return strings.Contains(out, "does not answer"), nil
+		})
+		if got := pid(); got != before {
+			t.Fatalf("rclone pid is %q, want %q: a stuck rclone was replaced", got, before)
+		}
+		signal("CONT")
+		expect(t, "writer", "cat /data/f", "hello")
+	})
+
 	// SIGKILL leaves a dead FUSE mount, SIGTERM makes rclone unmount before exiting.
 	for _, sig := range []string{"KILL", "TERM"} {
 		t.Run("rclone is remounted after SIG"+sig, func(t *testing.T) {

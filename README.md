@@ -372,6 +372,14 @@ path, and is bound into the pods' volume paths again, but running containers kee
 seeing `Transport endpoint is not connected` on the old file descriptors until they
 reopen them or restart.
 
+An rclone that still runs is never stopped or replaced, because the copies of its mount
+in the pods' containers live and die with it, and kubelet does not hand out new ones to
+running pods. A mount of a running rclone that does not answer, or is not mounted, is
+reported in the node plugin log as `leaving it alone` and left as it is; staging and
+publishing the volume fail meanwhile. Only a mount whose rclone is gone is remounted.
+Probing a mount point times out after 5s, so a mount that hangs holds up a pass and the
+calls for its volume by that much, not indefinitely.
+
 Surviving rclone processes are never restarted for an upgrade, since that would break
 their open file descriptors: they keep their rclone version until the volume is
 unmounted.

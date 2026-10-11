@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/scope"
+	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/supervisor"
 )
 
 // inContainer keeps rclone in the process of the test, which has no host systemd.
@@ -137,5 +140,38 @@ func TestStateLayoutCompat(t *testing.T) {
 	}
 	if states := loadStates(); len(states) != 1 || states[0].VolumeID != id || !states[0].Mounted {
 		t.Errorf("loadStates() = %+v", states)
+	}
+}
+
+// A mount point that is not mounted is repaired only once rclone is gone: an rclone that
+// runs may serve pods through copies of its mount that a new mount would not reach.
+func TestCheckLeavesRunningRcloneAlone(t *testing.T) {
+	StateDir = t.TempDir()
+	m := newTestMounts(t)
+	mountPoint := t.TempDir()
+	cmd := exec.Command("sleep", "60")
+	d, err := m.sup.Start(t.Context(), "pv", cmd, mountPoint, supervisor.StartOptions{Ready: func(string) bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	st := volumeState{VolumeID: "pv", StagingPath: mountPoint, Mounted: true}
+
+	if _, err := m.check(st); err == nil {
+		t.Error("check of an unmounted mount point of a running rclone: no error, it would be replaced")
+	}
+	// A mount that never came up has no rclone serving it
+	if _, err := m.check(volumeState{VolumeID: "pv", StagingPath: mountPoint}); err != nil {
+		t.Errorf("check of a mount that never came up: %v", err)
+	}
+
+	_ = cmd.Process.Kill()
+	select {
+	case <-d.Exited():
+	case <-time.After(10 * time.Second):
+		t.Fatal("rclone did not exit")
+	}
+	if _, err := m.check(st); err != nil {
+		t.Errorf("check after rclone exited: %v", err)
 	}
 }

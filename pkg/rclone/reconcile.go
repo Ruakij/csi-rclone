@@ -3,6 +3,7 @@ package rclone
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 
@@ -39,6 +40,9 @@ func scopeConfig(lifetime scope.Lifetime) scope.Config {
 type mounts struct {
 	scopes *scope.Manager
 	sup    *supervisor.Supervisor
+	// prober answers for every mount point instead of fusemount.Status: a statfs on the
+	// mount of an rclone that is stuck never returns, and would hold the lock of its volume forever.
+	prober *fusemount.Prober
 }
 
 func newMounts(ctx context.Context) (*mounts, error) {
@@ -50,7 +54,7 @@ func newMounts(ctx context.Context) (*mounts, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &mounts{scopes: scopes}
+	m := &mounts{scopes: scopes, prober: fusemount.NewProber(0)}
 	m.sup, err = supervisor.New(supervisor.Config{
 		Scope: scopes,
 		IDs: func() ([]string, error) {
@@ -88,6 +92,27 @@ func (m *mounts) stopScope(ctx context.Context, volumeID string) {
 	}
 }
 
+// live reports whether path is a live FUSE mount. A path that does not answer is not.
+func (m *mounts) live(path string) bool {
+	s, _ := m.prober.Probe(path)
+	return s == fusemount.Live
+}
+
+// check probes the mount point of st. A mount of an rclone that still runs is never replaced,
+// because every container using it holds a copy of the mount that only lives as long as this rclone,
+// and kubelet does not take the copy again for a running pod. So the error says to leave it alone:
+// the mount point does not answer, or it is not mounted although rclone runs.
+func (m *mounts) check(st volumeState) (fusemount.State, error) {
+	s, err := m.prober.Probe(st.StagingPath)
+	switch {
+	case errors.Is(err, fusemount.ErrHung):
+		return s, fmt.Errorf("rclone for volume %s does not answer at %s", st.VolumeID, st.StagingPath)
+	case s == fusemount.Other && st.Mounted && m.sup.PID(st.VolumeID) != 0:
+		return s, fmt.Errorf("rclone for volume %s runs, but %s is not mounted", st.VolumeID, st.StagingPath)
+	}
+	return s, nil
+}
+
 // reconcile remounts a volume whose rclone died, and binds it into its pods again. The caller holds the lock.
 func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	// Reloaded under the lock, the volume may have been unstaged or published meanwhile
@@ -96,7 +121,12 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		return
 	}
 
-	switch s := fusemount.Status(st.StagingPath); s {
+	s, err := m.check(st)
+	if err != nil {
+		klog.Errorf("leaving it alone: %v", err)
+		return
+	}
+	switch s {
 	case fusemount.Live:
 		if first {
 			klog.Infof("found live mount of volume %s at %s", volumeID, st.StagingPath)
@@ -124,7 +154,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	// Bind mounts still point at the dead mount after a remount
 	changed := false
 	for target, readOnly := range st.Targets {
-		switch fusemount.Status(target) {
+		switch s, _ := m.prober.Probe(target); s {
 		case fusemount.Dead:
 			klog.Warningf("binding volume %s into %s again", volumeID, target)
 			err := detach(target)
@@ -142,7 +172,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	// Kubelet removed them without unstaging or unpublishing, or the plugin
 	// crashed between mounting and recording the first user
 	for user := range st.Users {
-		if fusemount.Status(user) == fusemount.Gone {
+		if s, _ := m.prober.Probe(user); s == fusemount.Gone {
 			delete(st.Users, user)
 			changed = true
 		}

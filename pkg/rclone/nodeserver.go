@@ -132,11 +132,17 @@ func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user stri
 		}
 	case err != nil:
 		return st, status.Error(codes.Internal, err.Error())
-	case !fusemount.IsFUSE(st.StagingPath):
-		if err := m.remount(ctx, st); err != nil {
-			return st, status.Error(codes.Internal, err.Error())
+	default:
+		s, err := m.check(st)
+		if err != nil {
+			return st, status.Error(codes.Unavailable, err.Error())
 		}
-		st.Mounted = true
+		if s != fusemount.Live {
+			if err := m.remount(ctx, st); err != nil {
+				return st, status.Error(codes.Internal, err.Error())
+			}
+			st.Mounted = true
+		}
 	}
 	if st.Users == nil {
 		st.Users = map[string]struct{}{}
@@ -240,8 +246,8 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		defer ns.sup.Unlock(st.VolumeID)
 	}
 
-	if !fusemount.IsFUSE(st.StagingPath) {
-		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s", volumeID, st.StagingPath)
+	if !ns.live(st.StagingPath) {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s, or does not answer", volumeID, st.StagingPath)
 	}
 	// Recorded before binding, so reconcile can bind it again after rclone dies
 	readOnly := req.GetReadonly() || isReadOnly(req.GetVolumeCapability())
@@ -252,7 +258,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if err := saveState(st); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if fusemount.IsFUSE(targetPath) {
+	if ns.live(targetPath) {
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	if err := detach(targetPath); err != nil {
