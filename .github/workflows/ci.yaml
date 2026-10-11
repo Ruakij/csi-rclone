@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
   # A CVE published after a merge is still our problem, so rescan daily.
   schedule:
