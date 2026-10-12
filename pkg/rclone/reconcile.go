@@ -157,7 +157,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		switch s, _ := m.prober.Probe(target); s {
 		case fusemount.Dead:
 			klog.Warningf("binding volume %s into %s again", volumeID, target)
-			err := detach(target)
+			err := m.detach(target)
 			if err == nil {
 				err = fusemount.Bind(st.StagingPath, target, readOnly)
 			}
@@ -194,7 +194,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 // remount replaces the mount of st: it is unmounted, what is left of the old scope is
 // stopped so that the new rclone can take its name, and rclone is started again.
 func (m *mounts) remount(ctx context.Context, st volumeState) error {
-	if err := detach(st.StagingPath); err != nil {
+	if err := m.detach(st.StagingPath); err != nil {
 		return err
 	}
 	if err := m.scopes.Stop(ctx, st.VolumeID); err != nil {
@@ -205,12 +205,16 @@ func (m *mounts) remount(ctx context.Context, st volumeState) error {
 
 // detach unmounts path lazily. Without the privilege to unmount, as in the sanity tests,
 // the kernel answers EPERM for a path that is not mounted as well, which is no failure.
-func detach(path string) error {
+func (m *mounts) detach(path string) error {
 	err := fusemount.Unmount(path)
 	if errors.Is(err, syscall.EPERM) {
 		if s := fusemount.Status(path); s != fusemount.Live && s != fusemount.Dead {
 			return nil
 		}
+	}
+	if err == nil {
+		// A probe stuck on the old mount says nothing about the next one at path.
+		m.prober.Forget(path)
 	}
 	return err
 }

@@ -156,7 +156,7 @@ func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user stri
 
 func (m *mounts) mountRclone(ctx context.Context, id string, a rcloneArgs) error {
 	// A dead FUSE mount from an rclone that exited
-	if err := detach(mountPath(id)); err != nil {
+	if err := m.detach(mountPath(id)); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
 	e := m.mount(ctx, id, a.remote, a.remotePath, mountPath(id), a.configData, a.flags, a.readOnly)
@@ -184,7 +184,7 @@ func (m *mounts) release(ctx context.Context, st volumeState, user string) error
 // unmount drains uploads, unmounts rclone and removes its state. The caller holds the lock.
 func (m *mounts) unmount(ctx context.Context, id, mountPoint string) error {
 	waitForUploads(id)
-	if err := detach(mountPoint); err != nil {
+	if err := m.detach(mountPoint); err != nil {
 		return err
 	}
 	m.stopScope(ctx, id)
@@ -261,7 +261,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if ns.live(targetPath) {
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
-	if err := detach(targetPath); err != nil {
+	if err := ns.detach(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -286,7 +286,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	if ok {
 		defer ns.sup.Unlock(st.VolumeID)
 	}
-	if err := detach(targetPath); err != nil {
+	if err := ns.detach(targetPath); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
