@@ -1,5 +1,8 @@
 # CHANGELOG
 
+4.2.1:
+  - A volume staged again at the path of an unmounted one that did not answer is probed again at once, instead of counting as not answering until the old call returns.
+
 4.2.0:
   - A running rclone is never remounted. A mount that does not answer within 5s, or is not mounted while its rclone runs, is logged and left alone; NodeStageVolume fails with Unavailable and NodePublishVolume with FailedPrecondition for it. A remount happens only once the rclone of the volume is gone.
   - The rclone daemons, their systemd scopes, state files and the repair loop run on go-csi-fuse-supervisor. Scope names and state files are unchanged, so rclone mounts started by 4.1.x keep running across the upgrade.
