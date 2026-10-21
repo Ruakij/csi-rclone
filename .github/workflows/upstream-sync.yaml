@@ -2,11 +2,12 @@
 # hack/golangci-lint.version and the CSI sidecar image tags in the chart's
 # values.yaml. This bumps them and opens a PR per upstream.
 #
-# Events caused by GITHUB_TOKEN start no workflows. AUTOMATION_SSH_KEY is an optional
-# repository secret holding the private half of a deploy key with write access; the
-# branch is pushed over SSH with it, so pushes to an open PR run ci.yaml. Opening the PR
-# is still a GITHUB_TOKEN event, so a new PR gets its checks from a dispatched run on
-# its branch, as workflow_dispatch is the exception to that rule.
+# Detection runs in jobs without credentials, so upstream data never reaches a token
+# that can write. Only the PR jobs can write.
+#
+# Events caused by GITHUB_TOKEN start no workflows, except workflow_dispatch. After
+# every push to a PR branch the PR job therefore dispatches ci.yaml on that branch;
+# the run attaches its checks to the PR head commit.
 name: upstream-sync
 
 on:
@@ -15,21 +16,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
 
 jobs:
-
-  golangci-lint:
+  golangci-lint-check:
     runs-on: ubuntu-latest
-    concurrency:
-      group: upstream-sync-golangci-lint
-      cancel-in-progress: true
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      current: ${{ steps.detect.outputs.current }}
+      latest: ${{ steps.detect.outputs.latest }}
+      result: ${{ steps.lint.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ssh-key: ${{ secrets.AUTOMATION_SSH_KEY }}
+          persist-credentials: false
 
       - id: detect
         env:
@@ -38,12 +38,10 @@ jobs:
           set -euo pipefail
           current=$(cat hack/golangci-lint.version)
           latest=$(gh release view --repo golangci/golangci-lint --json tagName -q .tagName)
+          [[ "${latest}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "current=${current}" >> "$GITHUB_OUTPUT"
           echo "latest=${latest}" >> "$GITHUB_OUTPUT"
           [ "${current}" = "${latest}" ] && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - if: steps.detect.outputs.changed == 'true'
-        run: echo "${{ steps.detect.outputs.latest }}" > hack/golangci-lint.version
 
       # A new release usually means new checks, so let the PR say whether we pass.
       - if: steps.detect.outputs.changed == 'true'
@@ -53,85 +51,156 @@ jobs:
         with:
           version: ${{ steps.detect.outputs.latest }}
 
-      - if: steps.detect.outputs.changed == 'true'
-        id: pr
+  golangci-lint-pr:
+    needs: golangci-lint-check
+    if: needs.golangci-lint-check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    concurrency:
+      group: upstream-sync-golangci-lint
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - env:
+          LATEST: ${{ needs.golangci-lint-check.outputs.latest }}
+        run: echo "${LATEST}" > hack/golangci-lint.version
+
+      - id: pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: automation/golangci-lint-version-sync
           delete-branch: true
-          commit-message: "Bump golangci-lint to ${{ steps.detect.outputs.latest }}"
-          title: "Bump golangci-lint to ${{ steps.detect.outputs.latest }}"
+          commit-message: "Bump golangci-lint to ${{ needs.golangci-lint-check.outputs.latest }}"
+          title: "Bump golangci-lint to ${{ needs.golangci-lint-check.outputs.latest }}"
           body: |
             Automated golangci-lint upstream sync.
 
-            - Previous: `${{ steps.detect.outputs.current }}`
-            - New: `${{ steps.detect.outputs.latest }}`
+            - Previous: `${{ needs.golangci-lint-check.outputs.current }}`
+            - New: `${{ needs.golangci-lint-check.outputs.latest }}`
 
-            Result of running the new version against the tree: `${{ steps.lint.outcome }}`.
+            Result of running the new version against the tree: `${{ needs.golangci-lint-check.outputs.result }}`.
             A failure here is expected when a release adds checks; the findings are in the
             job log of the run that opened this PR.
 
-      - if: steps.pr.outputs.pull-request-operation == 'created'
+      # A push or a new PR starts no CI, so dispatch it. An unchanged branch gets a run
+      # only when none exists for its head yet, which retries a lost dispatch.
+      - if: steps.pr.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yaml --ref automation/golangci-lint-version-sync
+          OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
+          SHA: ${{ steps.pr.outputs.pull-request-head-sha }}
+          BRANCH: automation/golangci-lint-version-sync
+        run: |
+          set -euo pipefail
+          if [ "${OPERATION}" = none ] && [ "$(gh run list --workflow ci.yaml --commit "${SHA}" --json databaseId -q length)" != 0 ]; then
+            exit 0
+          fi
+          gh workflow run ci.yaml --ref "${BRANCH}"
 
-  sidecar:
+  sidecar-detect:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - key: registrar
-            repo: kubernetes-csi/node-driver-registrar
-          - key: provisioner
-            repo: kubernetes-csi/external-provisioner
-          - key: attacher
-            repo: kubernetes-csi/external-attacher
-    concurrency:
-      group: upstream-sync-${{ matrix.key }}
-      cancel-in-progress: true
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
     env:
       VALUES: charts/csi-rclone/values.yaml
+      # One "<values.yaml key> <upstream repo>" pair per line.
+      SIDECARS: |-
+        registrar kubernetes-csi/node-driver-registrar
+        provisioner kubernetes-csi/external-provisioner
+        attacher kubernetes-csi/external-attacher
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ssh-key: ${{ secrets.AUTOMATION_SSH_KEY }}
+          persist-credentials: false
 
       # Sorted rather than "latest": upstream also cuts patch releases for older
-      # minors, which GitHub may flag as the latest release.
+      # minors, which GitHub may flag as the latest release. The PR job gets the
+      # entries that need a bump as its matrix.
       - id: detect
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          current=$(sed -n '/^${{ matrix.key }}:/,/^[^ ]/ s/^    tag: //p' "$VALUES")
-          latest=$(gh release list --repo ${{ matrix.repo }} --exclude-pre-releases --exclude-drafts --limit 30 --json tagName -q '.[].tagName' | sort -V | tail -1)
-          echo "current=${current}" >> "$GITHUB_OUTPUT"
-          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
-          [ -n "${latest}" ] && [ "$(printf '%s\n' "${current}" "${latest}" | sort -V | tail -1)" != "${current}" ] && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          include='[]'
+          failed=0
+          while read -r key repo; do
+            [ -n "${key}" ] || continue
+            current=$(sed -n "/^${key}:/,/^[^ ]/ s/^    tag: //p" "${VALUES}")
+            if ! latest=$(gh release list --repo "${repo}" --exclude-pre-releases --exclude-drafts --limit 30 --json tagName -q '.[].tagName' | sort -V | tail -1) || [[ ! "${latest}" =~ ${semver} ]]; then
+              echo "::warning::${repo}: no semver release found"
+              failed=1
+              continue
+            fi
+            [ "$(printf '%s\n' "${current}" "${latest}" | sort -V | tail -1)" != "${current}" ] || continue
+            include=$(jq -c --arg key "${key}" --arg repo "${repo}" --arg current "${current}" --arg latest "${latest}" \
+              '. + [{key: $key, repo: $repo, current: $current, latest: $latest}]' <<< "${include}")
+          done <<< "${SIDECARS}"
+          echo "matrix=${include}" >> "$GITHUB_OUTPUT"
+          # The sidecars that did work still get their PRs; this only marks the run red.
+          exit "${failed}"
 
-      - if: steps.detect.outputs.changed == 'true'
+  sidecar-pr:
+    needs: sidecar-detect
+    # Runs after a failed detect too: the matrix output holds the sidecars that worked.
+    if: ${{ !cancelled() && needs.sidecar-detect.outputs.matrix != '' && needs.sidecar-detect.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.sidecar-detect.outputs.matrix) }}
+    concurrency:
+      group: upstream-sync-${{ matrix.key }}
+      cancel-in-progress: true
+    env:
+      VALUES: charts/csi-rclone/values.yaml
+      BRANCH: automation/${{ matrix.key }}-version-sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - env:
+          KEY: ${{ matrix.key }}
+          LATEST: ${{ matrix.latest }}
         run: |
-          sed -i '/^${{ matrix.key }}:/,/^[^ ]/ s/^\(    tag: \).*/\1${{ steps.detect.outputs.latest }}/' "$VALUES"
+          sed -i "/^${KEY}:/,/^[^ ]/ s/^\(    tag: \).*/\1${LATEST}/" "${VALUES}"
 
-      - if: steps.detect.outputs.changed == 'true'
-        id: pr
+      - id: pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          branch: automation/${{ matrix.key }}-version-sync
+          branch: ${{ env.BRANCH }}
           delete-branch: true
-          commit-message: "Bump ${{ matrix.repo }} to ${{ steps.detect.outputs.latest }}"
-          title: "Bump ${{ matrix.repo }} to ${{ steps.detect.outputs.latest }}"
+          commit-message: "Bump ${{ matrix.repo }} to ${{ matrix.latest }}"
+          title: "Bump ${{ matrix.repo }} to ${{ matrix.latest }}"
           body: |
             Automated CSI sidecar upstream sync.
 
-            - Previous: `${{ steps.detect.outputs.current }}`
-            - New: `${{ steps.detect.outputs.latest }}`
+            - Previous: `${{ matrix.current }}`
+            - New: `${{ matrix.latest }}`
 
             The `e2e` job runs the chart with the new image in kind.
 
-      - if: steps.pr.outputs.pull-request-operation == 'created'
+      # A push or a new PR starts no CI, so dispatch it. An unchanged branch gets a run
+      # only when none exists for its head yet, which retries a lost dispatch.
+      - if: steps.pr.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ci.yaml --ref automation/${{ matrix.key }}-version-sync
+          OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
+          SHA: ${{ steps.pr.outputs.pull-request-head-sha }}
+        run: |
+          set -euo pipefail
+          if [ "${OPERATION}" = none ] && [ "$(gh run list --workflow ci.yaml --commit "${SHA}" --json databaseId -q length)" != 0 ]; then
+            exit 0
+          fi
+          gh workflow run ci.yaml --ref "${BRANCH}"
