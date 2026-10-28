@@ -1,2 +1,4 @@
 # grpc-go in rclone 1.75.2: only crashes xDS gRPC servers (xds.NewGRPCServer), rclone uses grpc as a client.
 CVE-2026-84445 exp:2026-12-31
+# Go 1.27.2 stdlib in rclone 1.75.2, the latest release: crypto/x509 accepts untrusted intermediates. Waiting on an rclone build with Go 1.27.3.
+CVE-2026-111943 exp:2026-11-30
