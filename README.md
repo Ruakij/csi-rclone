@@ -68,6 +68,18 @@ and passes volume attributes to it unchecked. The fork keeps its volume attribut
   `/var/snap/microk8s/common/var/lib/kubelet`.
 - A namespace that admits privileged pods with host network and, unless
   `daemonLifetime` is `in-container`, host PID.
+- On Ubuntu 26.04 hosts, an AppArmor override that lets `fusermount3` mount below
+  `/var/lib/csi-rclone`. The distribution profile `fusermount3` applies to the binary
+  inside containers too and denies the mount, so pods stay in `ContainerCreating` with
+  `fusermount3: mount failed: Permission denied`; the kernel log shows
+  `apparmor="DENIED" operation="mount" profile="fusermount3"`. On each node, add to
+  `/etc/apparmor.d/local/fusermount3`:
+
+  ```
+  mount fstype=fuse.rclone -> /var/lib/csi-rclone/**,
+  ```
+
+  and reload the profile with `apparmor_parser -r /etc/apparmor.d/fusermount3`.
 
 ## Install
 
