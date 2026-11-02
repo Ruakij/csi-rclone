@@ -35,6 +35,8 @@ spec:
       hostPID: true
       {{- end }}
       dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        {{- toYaml .Values.node.podSecurityContext | nindent 8 }}
       containers:
         - name: node-driver-registrar
           image: "{{ .Values.registrar.image.repository }}:{{ .Values.registrar.image.tag }}"
@@ -43,6 +45,8 @@ spec:
             - --v={{ .Values.logLevel }}
             - --csi-address=/csi/csi.sock
             - --kubelet-registration-path={{ $socketDir }}/csi.sock
+          securityContext:
+            {{- toYaml .Values.registrar.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.registrar.resources | nindent 12 }}
           volumeMounts:
@@ -54,7 +58,7 @@ spec:
           image: {{ include "csi-rclone.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true
+            {{- toYaml .Values.node.securityContext | nindent 12 }}
           args:
             - /bin/csi-rclone-plugin
             - --nodeid=$(NODE_ID)
@@ -98,11 +102,16 @@ spec:
             - name: state-dir
               mountPath: /var/lib/csi-rclone
               mountPropagation: Bidirectional
+            # Scratch space for the read-only root filesystem
+            - name: tmp
+              mountPath: /tmp
             {{- if ne .Values.daemonLifetime "in-container" }}
             - name: systemd
               mountPath: /run/systemd
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: socket-dir
           hostPath:
             path: {{ $socketDir }}

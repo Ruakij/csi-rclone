@@ -12,6 +12,13 @@ registrar:
     requests:
       cpu: 5m
       memory: 16Mi
+  # Runs as root: it connects to the root-owned driver socket and creates its
+  # registration socket in the root-owned kubelet plugin directory on the host.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
 
 provisioner:
   image:
@@ -22,6 +29,11 @@ provisioner:
     requests:
       cpu: 5m
       memory: 32Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
 
 # The driver has no ControllerPublishVolume, so the attacher only marks volumes
 # attached. It stays because attachRequired cannot change on an existing CSIDriver.
@@ -34,6 +46,11 @@ attacher:
     requests:
       cpu: 5m
       memory: 32Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
 
 # Presets: k3s and RKE2 use /var/lib/kubelet by default but k3s installs that as a
 # symlink to /var/lib/rancher/k3s/agent/kubelet; MicroK8s uses
@@ -90,6 +107,18 @@ controller:
     requests:
       cpu: 10m
       memory: 32Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  # For the rclone container; the sidecars use provisioner and attacher securityContext.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -109,6 +138,18 @@ node:
       memory: 64Mi
   updateStrategy:
     type: RollingUpdate
+  # The seccomp profile is not applied to the privileged rclone container, but it
+  # covers the registrar. runAsNonRoot is unset: the rclone container needs root
+  # to mount and the registrar needs it to reach the root-owned host directories.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  # For the rclone container. Privileged is required for mounting FUSE with
+  # Bidirectional propagation, and Kubernetes rejects allowPrivilegeEscalation
+  # false on privileged containers, so it is unset.
+  securityContext:
+    privileged: true
+    readOnlyRootFilesystem: true
 
 podAnnotations: {}
 podLabels: {}

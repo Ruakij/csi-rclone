@@ -26,11 +26,7 @@ spec:
     spec:
       serviceAccountName: {{ include "csi-rclone.controllerServiceAccountName" . }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        seccompProfile:
-          type: RuntimeDefault
+        {{- toYaml .Values.controller.podSecurityContext | nindent 8 }}
       containers:
         - name: csi-provisioner
           image: "{{ .Values.provisioner.image.repository }}:{{ .Values.provisioner.image.tag }}"
@@ -42,11 +38,8 @@ spec:
             - --leader-election
             - --leader-election-namespace={{ .Release.Namespace }}
             - --v={{ .Values.logLevel }}
-          securityContext: &restricted
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+          securityContext:
+            {{- toYaml .Values.provisioner.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.provisioner.resources | nindent 12 }}
           volumeMounts:
@@ -60,7 +53,8 @@ spec:
             - --leader-election
             - --leader-election-namespace={{ .Release.Namespace }}
             - --v={{ .Values.logLevel }}
-          securityContext: *restricted
+          securityContext:
+            {{- toYaml .Values.attacher.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.attacher.resources | nindent 12 }}
           volumeMounts:
@@ -79,7 +73,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          securityContext: *restricted
+          securityContext:
+            {{- toYaml .Values.controller.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           volumeMounts:
