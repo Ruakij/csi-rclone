@@ -7,6 +7,34 @@ entries:
       artifacthub.io/operator: "false"
       artifacthub.io/prerelease: "false"
     apiVersion: v2
+    appVersion: 4.3.0
+    created: "2026-11-07T22:09:41.660040422Z"
+    description: CSI driver mounting rclone remotes as Kubernetes volumes
+    digest: 87d2f14a6eff2b4efeb6fa2a84c3cca30d3e8d4ff59c7d5cc9f079991fe95853
+    home: https://github.com/Ruakij/csi-rclone
+    keywords:
+    - csi
+    - storage
+    - rclone
+    - fuse
+    - s3
+    kubeVersion: '>=1.25.0-0'
+    maintainers:
+    - name: Ruakij
+      url: https://github.com/Ruakij
+    name: csi-rclone
+    sources:
+    - https://github.com/Ruakij/csi-rclone
+    type: application
+    urls:
+    - https://github.com/Ruakij/csi-rclone/releases/download/v4.3.0/csi-rclone-4.3.0.tgz
+    version: 4.3.0
+  - annotations:
+      artifacthub.io/category: storage
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/operator: "false"
+      artifacthub.io/prerelease: "false"
+    apiVersion: v2
     appVersion: 4.2.4
     created: "2026-11-07T18:37:53.729917211Z"
     description: CSI driver mounting rclone remotes as Kubernetes volumes
@@ -225,4 +253,4 @@ entries:
     urls:
     - https://github.com/Ruakij/csi-rclone/releases/download/v4.0.0/csi-rclone-4.0.0.tgz
     version: 4.0.0
-generated: "2026-11-07T18:37:53.729134088Z"
+generated: "2026-11-07T22:09:41.659280757Z"
