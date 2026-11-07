@@ -1,5 +1,8 @@
 # CHANGELOG
 
+4.2.4:
+  - rclone v1.76.0, Go 1.27.3.
+
 4.2.1:
   - A volume staged again at the path of an unmounted one that did not answer is probed again at once, instead of counting as not answering until the old call returns.
 
