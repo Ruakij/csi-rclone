@@ -3,86 +3,68 @@
 [![Helm](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fruakij.github.io%2Fcsi-rclone%2Findex.yaml&query=%24.entries%5B%27csi-rclone%27%5D%5B0%5D.version&label=Helm&logo=helm&color=0F1689&prefix=v)](#install)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.25%2B-326CE5?logo=kubernetes&logoColor=white)](#requirements)
 
-**An rclone mount CSI driver for Kubernetes.**
+**An rclone mount CSI driver for Kubernetes, whose mounts survive driver restarts.**
 
-It mounts any remote [rclone](https://rclone.org/) supports, S3, GCS, Azure Blob,
-WebDAV, SFTP and more, as a pod volume through
-[`rclone mount`](https://rclone.org/commands/rclone_mount/). Volumes come from static
+Mounts any remote [rclone](https://rclone.org/) supports (S3, GCS, Azure Blob, WebDAV,
+SFTP and more) as a pod volume through
+[`rclone mount`](https://rclone.org/commands/rclone_mount/), instead of a hand-managed
+`rclone mount` on the node that dies with whatever started it. Volumes come from static
 PersistentVolumes, from a StorageClass that gives each PVC its own path on one remote,
-or inline in the pod spec.
+or inline in the pod spec. The mounts keep running while the driver is upgraded or
+restarted. rclone runs as root on the node and many of its options reach local files or
+run commands, so options set as `volumeAttributes` or in a Secret are checked against an
+allow-list, and only admins write the `rclone-secret`.
 
-rclone options are set as `volumeAttributes` or in a Secret, and checked against an
-allow-list, since rclone runs as root on the node and many of its options reach local
-files or run commands.
+This is a fork of [wunderio/csi-rclone](https://github.com/wunderio/csi-rclone), which
+starts `rclone mount --daemon` in the node plugin container and passes volume attributes
+to it unchecked. The fork keeps its volume attributes, `rclone-secret` and StorageClass.
+
+## Contents
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Configuration](#configuration): [rclone-secret and volume attributes](#rclone-secret-and-volume-attributes), [Static PersistentVolumes](#static-persistentvolumes), [Dynamic provisioning](#dynamic-provisioning), [Ephemeral volumes](#ephemeral-volumes), [rclone option allow-list](#rclone-option-allow-list), [Chart values](#chart-values)
+- [Mount lifetime](#mount-lifetime): [Dead mounts](#dead-mounts)
+- [Security](#security)
+- [How it works](#how-it-works)
+- [Development](#development)
 
 ## Features
 
 - **Mounts survive driver restarts and upgrades.** Each rclone runs in a host systemd
-  scope, not in the driver pod. See [Surviving restarts](#surviving-restarts).
-- **Dead mounts are left to CSI.** A mount whose rclone died stays dead until a CSI
-  caller stages the volume again: kubelet after a node reboot, or a healer such as
-  [csi-mount-healer](https://github.com/Ruakij/csi-mount-healer), which also heals the
-  pods that run on it.
-- **Static, dynamic and ephemeral volumes.** PersistentVolumes with their own
-  credentials, a StorageClass that provisions a per-PVC path, and inline CSI volumes in
-  pod specs.
-- **One rclone per remote.** Volumes with exactly the same rclone arguments,
-  credentials included, share one running rclone mount, whether they are
-  PersistentVolumes or ephemeral and whether or not they are related in Kubernetes.
-- **rclone option allow-list.** Backends and options that could read local files, run
-  commands or use the node's cloud identity are refused, and endpoints can be limited
-  to a set of hosts.
-- **Namespace-safe provisioning.** A StorageClass path pattern must separate
-  namespaces, so PVCs cannot reach each other's data.
-- **Per-mount resource limits.** `MemoryMax` and `TasksMax` for each rclone scope,
-  outside the node plugin's own limits.
-
-## Differences from upstream
-
-This is a fork of [wunderio/csi-rclone](https://github.com/wunderio/csi-rclone), which
-starts `rclone mount --daemon` in the node plugin container at each pod's volume path
-and passes volume attributes to it unchecked. The fork keeps its volume attributes,
-`rclone-secret` and StorageClass, and changes the approach:
-
-- **Volume attributes are untrusted input.** Whoever creates PersistentVolumes or pods
-  should not get root on the node through rclone options, so options are allowed by
-  name instead of passed through, and pod creators never get the admin's
-  `rclone-secret`.
-- **Mounts are owned by the node, not the driver pod.** rclone runs in host systemd
-  scopes and the node plugin keeps its state on disk, so a restart or upgrade of the
-  driver finds its mounts instead of losing track of them.
-- **One rclone per remote, not per pod.** rclone mounts once per node at a staging
-  path and is bind-mounted into each pod, so pods on a node share one VFS cache and
-  one connection.
-- **Plain CSI behavior.** The driver does not repair a dead mount behind the back of
-  its pods, since it could fix the node side only; staging the volume again mounts it
-  anew. Nothing is left behind when the last user goes.
-- **Shipped and tested as a whole.** A Helm chart and versioned images from tagged
-  releases, the csi-test sanity suite, and end-to-end tests on a kind cluster in CI.
+  scope, and the node plugin keeps its state on disk. See [Mount lifetime](#mount-lifetime).
+- **Static, dynamic and ephemeral volumes.** PersistentVolumes, a StorageClass that
+  provisions a per-PVC path, and inline CSI volumes.
+- **One rclone per remote.** Volumes with exactly the same rclone arguments, credentials
+  included, share one rclone mount per node, and with it its VFS cache (pods see each
+  other's writes before they are uploaded) and connection. `reuseMounts: false` gives
+  each volume its own.
+- **rclone option allow-list.** Options that could read local files, run commands or use
+  the node's cloud identity are refused; endpoints can be limited to a set of hosts.
+- **Per-mount resource limits.** `MemoryMax` and `TasksMax` for each rclone scope.
+- **Plain CSI behavior.** A dead mount is replaced when the volume is staged again, not
+  repaired behind the back of its pods, see [Dead mounts](#dead-mounts).
 
 ## Requirements
 
 - Kubernetes 1.25 or newer. Driver versions before v3.0.0 support Kubernetes 1.13-1.19,
   but are not maintained.
 - The `fuse` kernel module on the nodes.
-- Host systemd on the nodes for mounts to survive driver restarts. Optional, see
-  [Surviving restarts](#surviving-restarts).
-- On MicroK8s, `kubeletRootDir` set to the node's real kubelet directory,
-  `/var/snap/microk8s/common/var/lib/kubelet`.
-- A namespace that admits privileged pods with host network and, unless
-  `daemonLifetime` is `in-container`, host PID.
-- On Ubuntu 26.04 hosts, an AppArmor override that lets `fusermount3` mount below
-  `/var/lib/csi-rclone`. The distribution profile `fusermount3` applies to the binary
-  inside containers too and denies the mount, so pods stay in `ContainerCreating` with
-  `fusermount3: mount failed: Permission denied`; the kernel log shows
-  `apparmor="DENIED" operation="mount" profile="fusermount3"`. On each node, add to
+- Host systemd on the nodes for mounts to survive driver restarts (optional, see
+  [Mount lifetime](#mount-lifetime)).
+- A namespace that admits privileged pods with host network and, unless `daemonLifetime`
+  is `in-container`, host PID.
+- On MicroK8s, `kubeletRootDir` set to `/var/snap/microk8s/common/var/lib/kubelet`.
+- On Ubuntu 26.04 hosts, an AppArmor override for `fusermount3`, whose distribution
+  profile denies mounts below `/var/lib/csi-rclone` (pods stay in `ContainerCreating`
+  with `fusermount3: mount failed: Permission denied`). On each node, add to
   `/etc/apparmor.d/local/fusermount3`:
 
   ```
   mount fstype=fuse.rclone -> /var/lib/csi-rclone/**,
   ```
 
-  and reload the profile with `apparmor_parser -r /etc/apparmor.d/fusermount3`.
+  and reload with `apparmor_parser -r /etc/apparmor.d/fusermount3`.
 
 ## Install
 
@@ -98,26 +80,24 @@ Or straight from the OCI registry, which is also where prereleases go:
 helm install csi-rclone oci://ghcr.io/ruakij/charts/csi-rclone --namespace csi-rclone --create-namespace
 ```
 
-Or from a checkout, to run an unreleased revision:
+Or from a checkout, to run an unreleased revision: `helm install csi-rclone charts/csi-rclone ...`.
+The driver name is `csi-rclone`; PersistentVolumes and pods put it in `csi.driver`.
 
-```sh
-helm install csi-rclone charts/csi-rclone --namespace csi-rclone --create-namespace
-```
+## Configuration
 
-The driver name is `csi-rclone`, and that is what PersistentVolumes and pods put in
-`csi.driver`.
-
-## Use
-
-A remote needs a backend rclone supports, such as [MinIO](https://min.io/) or any
-S3-compatible service.
-
-### Defaults in rclone-secret
+### rclone-secret and volume attributes
 
 The Secret `rclone-secret` in the release namespace holds defaults for every
-PersistentVolume, static or provisioned. It is optional if PersistentVolumes set
-everything in `volumeAttributes`. The chart creates it from `rcloneSecret.stringData`
-with `rcloneSecret.create: true`.
+PersistentVolume, static or provisioned; the chart creates it from
+`rcloneSecret.stringData` with `rcloneSecret.create: true`. Its keys, the
+`nodePublishSecretRef` Secret (ephemeral volumes) and `volumeAttributes` are merged,
+the latter winning:
+
+- `remote` (required): an rclone backend such as `s3`, or a section name in `configData`.
+- `remotePath` (required): path on the remote, such as a bucket and prefix.
+- `configData`: rclone configuration file contents, see
+  [rclone-secret-file-config.yaml](example/kubernetes/rclone-secret-file-config.yaml).
+- other keys: rclone flags without `--`, e.g. `s3-endpoint`, within the allow-list.
 
 ```yaml
 apiVersion: v1
@@ -134,33 +114,14 @@ stringData:
   s3-secret-access-key: "SECRET_ACCESS_KEY"
 ```
 
-Or with an rclone configuration file in `configData`:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: rclone-secret
-type: Opaque
-stringData:
-  remote: "my-s3"
-  remotePath: "projectname"
-  configData: |
-    [my-s3]
-    type = s3
-    provider = Minio
-    access_key_id = ACCESS_KEY_ID
-    secret_access_key = SECRET_ACCESS_KEY
-    endpoint = http://minio-release.default:9000
-```
-
-See [rclone-secret-example.yaml](example/kubernetes/rclone-secret-example.yaml) and
-[rclone-secret-file-config.yaml](example/kubernetes/rclone-secret-file-config.yaml).
+rclone mounts a volume read-only when the access mode is `ReadOnlyMany` or the
+PersistentVolume has `ro` in `mountOptions`. A pod that mounts it with `readOnly: true`
+gets a read-only bind of a writable mount. Other `mountOptions` are ignored.
 
 ### Static PersistentVolumes
 
-Keys in `volumeAttributes` override those in `rclone-secret`. Leave `volumeAttributes`
-empty to use the Secret alone.
+Leave `volumeAttributes` empty to use `rclone-secret` alone. See
+[nginx-example.yaml](example/kubernetes/nginx-example.yaml).
 
 ```yaml
 apiVersion: v1
@@ -168,8 +129,7 @@ kind: PersistentVolume
 metadata:
   name: data-rclone-example
 spec:
-  accessModes:
-    - ReadWriteMany
+  accessModes: [ReadWriteMany]
   capacity:
     storage: 10Gi
   # Only this PVC can bind the PV, and no provisioner uses the empty class
@@ -183,32 +143,36 @@ spec:
     volumeAttributes:
       remote: "s3"
       remotePath: "projectname/pvname"
-      s3-provider: "Minio"
-      s3-endpoint: "http://minio.minio:9000"
-      s3-access-key-id: "ACCESS_KEY_ID"
+      s3-access-key-id: "ACCESS_KEY_ID"        # overrides rclone-secret
       s3-secret-access-key: "SECRET_ACCESS_KEY"
 ```
-
-See [nginx-example.yaml](example/kubernetes/nginx-example.yaml).
 
 ### Dynamic provisioning
 
 With `storageClass.create: true`, the chart creates the StorageClass `rclone`. Its
-volumes use `remote` and `remotePath` from `rclone-secret`, with a per-PVC suffix from
-`pathPattern`. See [nginx-pvc-example.yaml](example/kubernetes/nginx-pvc-example.yaml)
-and [StorageClass parameters](#storageclass-parameters).
+volumes use `remote` and `remotePath` from `rclone-secret`, plus a per-PVC suffix from
+the StorageClass parameter `pathPattern`, built from `${.PVC.namespace}`,
+`${.PVC.name}`, `${.PVC.labels.<key>}` and `${.PVC.annotations.<key>}`. See
+[nginx-pvc-example.yaml](example/kubernetes/nginx-pvc-example.yaml).
 
-Deleting a PVC does not delete its data on the remote. A new PVC that expands to the
-same path gets the old data.
+`pathPattern` must contain `${.PVC.namespace}` as a whole path segment, with only fixed
+text before it (e.g. `${.PVC.namespace}/${.PVC.name}`), otherwise PVCs in different
+namespaces could mount each other's data and provisioning fails. The parameter
+`sharedRemote: "true"` disables that check for classes whose PVCs share data. Expanded
+paths with `.` or `..` segments are rejected.
+
+PVC annotations: `csi-rclone/umask` sets the octal `umask` of `rclone mount`;
+`csi-rclone/storage-path` fills `${.PVC.annotations.csi-rclone/storage-path}`. Other
+parameters are not provisioned; create a PersistentVolume for them. Deleting a PVC does
+not delete its data on the remote; a new PVC with the same path gets it.
 
 ### Ephemeral volumes
 
-Pods can define a volume inline, without a PersistentVolume. Its `volumeAttributes` are
-the same as a PersistentVolume's. `rclone-secret` is not applied, since anyone who can
-create pods could otherwise mount any path with its credentials. Credentials come from
-`configData`, `volumeAttributes` or a Secret in the pod's namespace named by
-`nodePublishSecretRef`, whose keys become rclone flags like `volumeAttributes`, which
-override them.
+Pods can define a volume inline, without a PersistentVolume. `rclone-secret` is not
+applied, since anyone who can create pods could otherwise mount any path with its
+credentials. Credentials come from `configData`, `volumeAttributes` or a Secret in the
+pod's namespace named by `nodePublishSecretRef`, whose keys become rclone flags and are
+overridden by `volumeAttributes`.
 
 ```yaml
 volumes:
@@ -224,58 +188,7 @@ volumes:
         name: s3-credentials # s3-access-key-id, s3-secret-access-key
 ```
 
-The chart value `ephemeralVolumes: false` disables ephemeral volumes in the CSIDriver.
-
-### Shared mounts
-
-A volume reuses the running rclone mount of any other volume on the node whose
-`remote`, `remotePath`, `configData`, flags and read-only mode match it exactly,
-credentials included. The volumes need not be related in Kubernetes: a
-PersistentVolume and an ephemeral volume on the same remote share one rclone. They
-also share its VFS cache, so each sees the other's writes before they are uploaded.
-`reuseMounts: false` gives each volume its own rclone.
-
-## Configuration
-
-### Volume attributes
-
-Set in `volumeAttributes`, `rclone-secret` or the `nodePublishSecretRef` Secret:
-
-| Key          | Default  | Description                                                                             |
-| ------------ | -------- | --------------------------------------------------------------------------------------- |
-| `remote`     | required | rclone remote: a backend such as `s3`, or a section name in `configData`.               |
-| `remotePath` | required | Path on the remote, such as a bucket and prefix.                                        |
-| `configData` | none     | rclone configuration file contents.                                                     |
-| other keys   | none     | rclone flags without `--`, e.g. `s3-endpoint`, `vfs-cache-mode`, within the allow-list. |
-
-rclone mounts a volume read-only when the access mode is `ReadOnlyMany` or the
-PersistentVolume has `ro` in `mountOptions`. A pod that mounts it with `readOnly: true`
-gets a read-only bind of a writable mount. Other `mountOptions` are ignored; set rclone
-flags in `volumeAttributes`.
-
-### StorageClass parameters
-
-Dynamically provisioned volumes all use `remote` and `remotePath` from `rclone-secret`.
-
-| Parameter      | Description                                                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `pathPattern`  | Suffix appended to `remotePath`, built from `${.PVC.namespace}`, `${.PVC.name}`, `${.PVC.labels.<key>}` and `${.PVC.annotations.<key>}`. |
-| `sharedRemote` | `"true"` disables the namespace check below, for StorageClasses where all PVCs are meant to share data.                                  |
-
-`pathPattern` must contain `${.PVC.namespace}` as a whole path segment, with only fixed
-text before it (e.g. `${.PVC.namespace}/${.PVC.name}`). Otherwise PVCs in different
-namespaces could mount each other's data, and provisioning fails. Expanded paths
-containing `.` or `..` segments are rejected.
-
-### PersistentVolumeClaim annotations
-
-| Annotation                | Description                                                                               |
-| ------------------------- | ----------------------------------------------------------------------------------------- |
-| `csi-rclone/umask`        | `umask` parameter for `rclone mount`, octal.                                              |
-| `csi-rclone/storage-path` | Path segment for `${.PVC.annotations.csi-rclone/storage-path}`, if `pathPattern` uses it. |
-
-Provisioning of other parameters is unsupported; create a PersistentVolume with
-`volumeAttributes` to set them.
+`ephemeralVolumes: false` disables them in the CSIDriver.
 
 ### rclone option allow-list
 
@@ -298,127 +211,71 @@ Review the diff after an rclone update.
 
 ### Chart values
 
-| Value                                                | Default                                                 | Description                                                                                                          |
-| ---------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `image.repository`                                   | `ghcr.io/ruakij/csi-rclone`                             | Driver image.                                                                                                        |
-| `image.tag`                                          | chart `appVersion`                                      | Driver image tag.                                                                                                    |
-| `image.pullPolicy`                                   | `IfNotPresent`                                          | Driver image pull policy.                                                                                            |
-| `registrar.image.*`                                  | `registry.k8s.io/sig-storage/csi-node-driver-registrar` | `node-driver-registrar` image, same fields as `image`.                                                               |
-| `registrar.resources`                                | requests `5m` CPU, `16Mi` memory                        | `node-driver-registrar` container resources.                                                                         |
-| `provisioner.image.*`                                | `registry.k8s.io/sig-storage/csi-provisioner`           | `csi-provisioner` image, same fields as `image`.                                                                     |
-| `provisioner.resources`                              | requests `5m` CPU, `32Mi` memory                        | `csi-provisioner` container resources.                                                                               |
-| `attacher.image.*`                                   | `registry.k8s.io/sig-storage/csi-attacher`              | `csi-attacher` image, same fields as `image`.                                                                        |
-| `attacher.resources`                                 | requests `5m` CPU, `32Mi` memory                        | `csi-attacher` container resources.                                                                                  |
-| `kubeletRootDir`                                     | `/var/lib/kubelet`                                      | The node's kubelet directory. MicroK8s uses `/var/snap/microk8s/common/var/lib/kubelet`.                             |
-| `daemonLifetime`                                     | `auto`                                                  | `auto` uses host systemd where reachable, `systemd` requires it, `in-container` keeps rclone in the node plugin pod. |
-| `scopeMemoryMax`                                     | `""`                                                    | `MemoryMax` of each rclone scope, e.g. `2Gi`. rclone does not count against the node plugin's resource limits.       |
-| `scopeTasksMax`                                      | `0`                                                     | `TasksMax` of each rclone scope, `0` for no limit.                                                                   |
-| `allowedBackends`                                    | `[]`                                                    | Restricts the backends further, e.g. `[s3, crypt]`. Empty allows all of the allow-list.                              |
-| `allowedEndpoints`                                   | `[]`                                                    | Hosts that endpoint options may point at. Entries starting with `.` allow subdomains. Empty allows any.              |
-| `unrestrictedRcloneOptions`                          | `false`                                                 | Allows every rclone option and backend, see [Security](#security).                                                   |
-| `ephemeralVolumes`                                   | `true`                                                  | Allow inline CSI volumes in pod specs. Immutable in the CSIDriver: changing it needs the CSIDriver deleted first.    |
-| `reuseMounts`                                        | `true`                                                  | Share one rclone mount between volumes with exactly the same rclone arguments.                                       |
-| `rcloneSecret.create`                                | `false`                                                 | Create `rclone-secret` from `rcloneSecret.stringData`.                                                               |
-| `rcloneSecret.stringData`                            | `{}`                                                    | Defaults for every PersistentVolume, see [Defaults in rclone-secret](#defaults-in-rclone-secret).                    |
-| `storageClass.create`                                | `false`                                                 | Create a StorageClass for dynamic provisioning.                                                                      |
-| `storageClass.name`                                  | `rclone`                                                | StorageClass name.                                                                                                   |
-| `storageClass.pathPattern`                           | `${.PVC.namespace}/${.PVC.name}`                        | Per-PVC path suffix, see [StorageClass parameters](#storageclass-parameters).                                        |
-| `storageClass.sharedRemote`                          | `false`                                                 | Let all PVCs of the class share data.                                                                                |
-| `storageClass.reclaimPolicy`                         | `Delete`                                                | StorageClass reclaim policy. Data on the remote is kept either way.                                                  |
-| `logLevel`                                           | `1`                                                     | klog verbosity.                                                                                                      |
-| `rbac.create`                                        | `true`                                                  | Create the ClusterRoles and bindings.                                                                                |
-| `serviceAccount.create`                              | `true`                                                  | Create the ServiceAccounts.                                                                                          |
-| `serviceAccount.controllerName`                      | `""`                                                    | Controller ServiceAccount; defaults to one derived from the release name.                                            |
-| `serviceAccount.nodeName`                            | `""`                                                    | Node plugin ServiceAccount; defaults to one derived from the release name.                                           |
-| `controller.replicas`                                | `1`                                                     | Controller replicas.                                                                                                 |
-| `controller.resources`                               | requests `10m` CPU, `32Mi` memory                       | Controller container resources.                                                                                      |
-| `controller.nodeSelector`, `tolerations`, `affinity` | `{}`, `[]`, `{}`                                        | Controller scheduling constraints.                                                                                   |
-| `node.priorityClassName`                             | `system-node-critical`                                  | Priority class of the node plugin pods.                                                                              |
-| `node.tolerations`                                   | tolerate everything                                     | Node plugin tolerations.                                                                                             |
-| `node.nodeSelector`, `affinity`                      | `{}`                                                    | Node plugin scheduling constraints.                                                                                  |
-| `node.resources`                                     | requests `10m` CPU, `64Mi` memory                       | Node plugin container resources. No limits: with `in-container`, a limit would OOM-kill every mount on the node.     |
-| `node.updateStrategy`                                | `RollingUpdate`                                         | Node plugin DaemonSet update strategy.                                                                               |
-| `podAnnotations`, `podLabels`                        | `{}`                                                    | Extra metadata on all pods.                                                                                          |
+The values that matter; [values.yaml](charts/csi-rclone/values.yaml) has the rest
+(images, resources, RBAC, ServiceAccounts, scheduling, `logLevel`).
 
-The node plugin flags behind these values are `--daemon-lifetime`,
-`--scope-memory-max`, `--scope-tasks-max`, `--allowed-backends`, `--allowed-endpoints`,
-`--unrestricted-rclone-options` and `--reuse-mounts`. rclone logs to
-`/var/lib/csi-rclone/<hash>/rclone.log` on the node.
+| Value                       | Default            | Description                                                                                                          |
+| --------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `daemonLifetime`            | `auto`             | `auto` uses host systemd where reachable, `systemd` requires it, `in-container` keeps rclone in the node plugin pod. |
+| `scopeMemoryMax`            | `""`               | `MemoryMax` of each rclone scope, e.g. `2Gi`.                                                                        |
+| `scopeTasksMax`             | `0`                | `TasksMax` of each rclone scope, `0` for no limit.                                                                   |
+| `allowedBackends`           | `[]`               | Restricts the backends further, e.g. `[s3, crypt]`. Empty allows all of the allow-list.                              |
+| `allowedEndpoints`          | `[]`               | Hosts that endpoint options may point at; entries starting with `.` allow subdomains. Empty allows any.              |
+| `unrestrictedRcloneOptions` | `false`            | Allows every rclone option and backend, see [Security](#security).                                                   |
+| `ephemeralVolumes`          | `true`             | Allow inline CSI volumes. Immutable in the CSIDriver: changing it needs the CSIDriver deleted first.                 |
+| `reuseMounts`               | `true`             | Share one rclone mount between volumes with exactly the same rclone arguments.                                       |
+| `storageClass.create`       | `false`            | Create the StorageClass; `storageClass.{name,pathPattern,sharedRemote,reclaimPolicy}` configure it.                  |
 
-## How it works
+`node.resources` sets no limits on purpose: with `in-container`, a limit would OOM-kill
+every mount on the node. The node plugin flags behind these values are
+`--daemon-lifetime`, `--scope-memory-max`, `--scope-tasks-max`, `--allowed-backends`,
+`--allowed-endpoints`, `--unrestricted-rclone-options` and `--reuse-mounts`. rclone logs
+to `/var/lib/csi-rclone/<hash>/rclone.log` on the node.
 
-The chart installs a controller, which provisions volumes for the StorageClass, and a
-node plugin DaemonSet. For each volume on a node, the node plugin:
+## Mount lifetime
 
-1. Merges `rclone-secret` (PersistentVolumes only), the `nodePublishSecretRef` Secret
-   (ephemeral volumes only) and `volumeAttributes`, later ones winning, into a remote,
-   a path, an optional rclone config and rclone flags.
-2. Checks them against the [rclone option allow-list](#rclone-option-allow-list).
-3. Looks for a running rclone mount with exactly these arguments, credentials and
-   read-only mode included. If there is none, it starts `rclone mount` at
-   `/var/lib/csi-rclone/<hash>/mnt` and moves it into its systemd scope.
-4. Records the volume as a user of that mount in `/var/lib/csi-rclone/<hash>/state.json`
-   and bind-mounts the mount into the pod, read-only if the pod asks for it.
+Each rclone is moved into a transient host systemd scope, `csi-rclone-<hash>.scope`, so
+it belongs to host systemd, not the driver pod's cgroup. With `daemonLifetime`:
 
-Kubelet stages PersistentVolumes and publishes them to pods in two steps; ephemeral
-volumes are only published, and the node plugin stages them itself. When the last
-volume using a mount is unstaged or unpublished, the node plugin waits for pending
-uploads and unmounts it.
-
-### Surviving restarts
-
-Many FUSE-based CSI drivers run their FUSE daemons inside the driver pod. Restarting,
-upgrading or evicting that pod kills every daemon on the node, and every workload using
-those mounts is left with `Transport endpoint is not connected` until it is recreated.
-
-Here, each rclone is moved into a transient host systemd scope,
-`csi-rclone-<hash>.scope`, the same mechanism as `systemd-run --scope`. From then on it
-belongs to host systemd, not the driver pod's cgroup.
-
-| `daemonLifetime`              | Node plugin restarts                                                   | rclone crash or OOM kill                                            |
-| ----------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `systemd`, or `auto` with it  | Unaffected: rclone belongs to host systemd.                            | The mount stays dead; pods see `ENOTCONN` until it is staged again. |
-| `in-container`, or no systemd | The mounts die with the pod and stay dead until they are staged again. | The mount stays dead; pods see `ENOTCONN` until it is staged again. |
-
-The node plugin learns of exits from its own child processes and, with host systemd,
-from the scope stopping, which also covers rclone processes started by an earlier node
-plugin pod. A pass every 30s logs each dead mount and drops the targets and users that
-kubelet removed without unpublishing them.
-
-A dead mount is replaced only when a CSI caller stages the volume again:
-`NodeStageVolume` mounts it anew at the same path, whether the volume is unstaged
-first or still staged. Kubelet does so after a node reboot. Pods that were running keep
-their copy of the dead mount and see `Transport endpoint is not connected` until their
-volume paths are published again, which takes a restart of the pod or a healer.
-[csi-mount-healer](https://github.com/Ruakij/csi-mount-healer) is the recommended
-companion: it unstages and stages the volume, and publishes it to each pod again.
-`NodePublishVolume` fails with `FailedPrecondition` for a staged volume that is not
-mounted, so a new pod waits until the volume is staged again.
-
-An rclone that still runs is never stopped or replaced, because the copies of its mount
-in the pods' containers live and die with it, and kubelet does not hand out new ones to
-running pods. A mount of a running rclone that does not answer, or is not mounted, is
-reported in the node plugin log as `leaving it alone` and left as it is; staging and
-publishing the volume fail meanwhile. Only a mount whose rclone is gone is remounted,
-when it is staged again.
-Probing a mount point times out after 5s, so a mount that hangs holds up a pass and the
-calls for its volume by that much, not indefinitely.
+- `systemd`, or `auto` with host systemd: node plugin restarts leave the mounts alone.
+  `systemd` makes the node plugin refuse to start on nodes without host systemd.
+- `in-container`, or `auto` without systemd: mounts die with the pod and stay dead until
+  they are staged again.
 
 Surviving rclone processes are never restarted for an upgrade, since that would break
 their open file descriptors: they keep their rclone version until the volume is
 unmounted.
 
-With `daemonLifetime: systemd`, the node plugin does not start at all on nodes without
-host systemd, instead of silently falling back.
+### Dead mounts
+
+An rclone crash or OOM kill leaves its mount dead in every mode. The node plugin learns
+of it from its child processes or the stopped scope, logs it in a pass every 30s and
+drops targets that kubelet removed without unpublishing them.
+
+A dead mount is not repaired in place. It is replaced when a CSI caller stages the
+volume again: `NodeStageVolume` mounts it anew at the same path, whether the volume is
+unstaged first or still staged. Kubelet does so after a node reboot. Running pods keep
+their copy of the dead mount and see `Transport endpoint is not connected` until their
+volume paths are published again, which takes a pod restart or a healer.
+[csi-mount-healer](https://github.com/Ruakij/csi-mount-healer) is the recommended
+companion: it unstages and stages the volume and publishes it to each pod again.
+`NodePublishVolume` fails with `FailedPrecondition` for a staged volume that is not
+mounted, so a new pod waits until the volume is staged again.
+
+A running rclone is never stopped or replaced, since the copies of its mount in the
+containers live and die with it. If its mount does not answer or is not mounted, the
+node plugin logs `leaving it alone` and staging and publishing the volume fail
+meanwhile. Probing a mount point times out after 5s.
 
 ## Security
 
-- rclone runs as root in the privileged node plugin. Keys in `rclone-secret` and
-  PersistentVolume `volumeAttributes` become rclone flags, and `configData` becomes the
-  rclone config, both limited by the [rclone option allow-list](#rclone-option-allow-list).
-  With `unrestrictedRcloneOptions`, rclone can run commands (`password-command`,
-  `sftp-ssh`), write files (`log-file`) and mount local paths (`local` backend), so
-  whoever can write `rclone-secret` or create PersistentVolumes has root on every node.
+- rclone runs as root in the privileged node plugin, which also uses `hostPID` and the
+  host systemd D-Bus socket (host root). Keys in `rclone-secret` and PersistentVolume
+  `volumeAttributes` become rclone flags and `configData` the rclone config, limited by
+  the [rclone option allow-list](#rclone-option-allow-list). With
+  `unrestrictedRcloneOptions`, rclone can run commands (`password-command`, `sftp-ssh`),
+  write files (`log-file`) and mount local paths (`local` backend), so whoever can write
+  `rclone-secret` or create PersistentVolumes has root on every node.
 - The allow-list does not stop rclone from connecting to any host, including cloud
   metadata endpoints and cluster-internal services. Set `allowedEndpoints`, and block
   these hosts with a NetworkPolicy or firewall, since rclone follows redirects and
@@ -428,30 +285,37 @@ host systemd, instead of silently falling back.
   with an admission policy, if that is not wanted.
 - Static PersistentVolumes should set `claimRef`, otherwise a PVC in any namespace can
   bind them and use their credentials.
-- The node plugin uses `hostPID` and the host systemd D-Bus socket to start rclone
-  scopes, which is host root as well.
-- Volumes that share an rclone mount also share its VFS cache, so pods see each other's
-  writes before they are uploaded.
 - `/var/lib/csi-rclone` on each node holds every mounted volume's rclone config and
   flags, including credentials, readable only by root.
 
-## Build
+## How it works
+
+The chart installs a controller, which provisions volumes for the StorageClass, and a
+node plugin DaemonSet. For each volume on a node, the node plugin:
+
+1. Merges `rclone-secret`, `nodePublishSecretRef` and `volumeAttributes` into a remote,
+   a path, an optional rclone config and rclone flags, and checks them against the
+   [rclone option allow-list](#rclone-option-allow-list).
+2. Looks for a running rclone mount with exactly these arguments, credentials and
+   read-only mode included. If there is none, it starts `rclone mount` at
+   `/var/lib/csi-rclone/<hash>/mnt` and moves it into its systemd scope.
+3. Records the volume as a user of that mount in `/var/lib/csi-rclone/<hash>/state.json`
+   and bind-mounts the mount into the pod, read-only if the pod asks for it.
+4. Waits for pending uploads and unmounts when the last user is unstaged or unpublished.
+
+Kubelet stages PersistentVolumes and publishes them to pods in two steps; ephemeral
+volumes are only published, and the node plugin stages them itself.
+
+## Development
 
 ```sh
-make build  # image tagged with the version in VERSION
-make e2e    # chart on a kind cluster, needs docker, kind, kubectl and helm
+git config core.hooksPath .githooks  # go mod tidy, gofmt, vet, tests, golangci-lint, helm lint before each commit
+make build     # image tagged with the version in VERSION
+make e2e       # chart on a kind cluster, needs docker, kind, kubectl and helm; E2E_KEEP=1 keeps the cluster
+go test ./...  # unit tests and, on Linux, the csi-test sanity suite
 ```
 
 Mount code is Linux-only; on a non-Linux machine, build and vet with `GOOS=linux`.
-
-`go test ./...` runs the unit tests, and on Linux the csi-test sanity suite. `make e2e`
-installs the chart into a [kind](https://kind.sigs.k8s.io) cluster and checks writes,
-read-only volumes, the allow-list, driver restarts, dead mounts staying dead until staged again, shared mounts and cleanup
-from real pods; `E2E_KEEP=1` leaves the cluster running.
-
-`git config core.hooksPath .githooks` enables the pre-commit hook, which runs
-`go mod tidy`, gofmt, vet, tests and golangci-lint on the staged packages, and
-`helm lint` when the chart changed.
 
 Pushing a tag `vX.Y.Z` publishes the image to `ghcr.io/ruakij/csi-rclone`, the chart to
 the Helm repository and `oci://ghcr.io/ruakij/charts`, and a GitHub release. Tags with a
