@@ -19,8 +19,10 @@ files or run commands.
 
 - **Mounts survive driver restarts and upgrades.** Each rclone runs in a host systemd
   scope, not in the driver pod. See [Surviving restarts](#surviving-restarts).
-- **Dead mounts come back.** When an rclone dies, the node plugin remounts it within a
-  second and binds it into the pods again.
+- **Dead mounts are left to CSI.** A mount whose rclone died stays dead until a CSI
+  caller stages the volume again: kubelet after a node reboot, or a healer such as
+  [csi-mount-healer](https://github.com/Ruakij/csi-mount-healer), which also heals the
+  pods that run on it.
 - **Static, dynamic and ephemeral volumes.** PersistentVolumes with their own
   credentials, a StorageClass that provisions a per-PVC path, and inline CSI volumes in
   pod specs.
@@ -52,8 +54,9 @@ and passes volume attributes to it unchecked. The fork keeps its volume attribut
 - **One rclone per remote, not per pod.** rclone mounts once per node at a staging
   path and is bind-mounted into each pod, so pods on a node share one VFS cache and
   one connection.
-- **Failures are repaired, not left to the user.** Dead mounts are remounted and bound
-  into their pods again; nothing is left behind when the last user goes.
+- **Plain CSI behavior.** The driver does not repair a dead mount behind the back of
+  its pods, since it could fix the node side only; staging the volume again mounts it
+  anew. Nothing is left behind when the last user goes.
 - **Shipped and tested as a whole.** A Helm chart and versioned images from tagged
   releases, the csi-test sanity suite, and end-to-end tests on a kind cluster in CI.
 
@@ -372,23 +375,32 @@ Here, each rclone is moved into a transient host systemd scope,
 `csi-rclone-<hash>.scope`, the same mechanism as `systemd-run --scope`. From then on it
 belongs to host systemd, not the driver pod's cgroup.
 
-| `daemonLifetime`              | Node plugin restarts                                                          | rclone crash or OOM kill                                         |
-| ----------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `systemd`, or `auto` with it  | Unaffected: rclone belongs to host systemd.                                   | Remounted within a second; open file descriptors see `ENOTCONN`. |
-| `in-container`, or no systemd | Remounted once the node plugin is back; open file descriptors see `ENOTCONN`. | Remounted within a second; open file descriptors see `ENOTCONN`. |
+| `daemonLifetime`              | Node plugin restarts                                                   | rclone crash or OOM kill                                            |
+| ----------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `systemd`, or `auto` with it  | Unaffected: rclone belongs to host systemd.                            | The mount stays dead; pods see `ENOTCONN` until it is staged again. |
+| `in-container`, or no systemd | The mounts die with the pod and stay dead until they are staged again. | The mount stays dead; pods see `ENOTCONN` until it is staged again. |
 
 The node plugin learns of exits from its own child processes and, with host systemd,
 from the scope stopping, which also covers rclone processes started by an earlier node
-plugin pod. A pass every 30s catches anything missed. The mount comes back at the same
-path, and is bound into the pods' volume paths again, but running containers keep
-seeing `Transport endpoint is not connected` on the old file descriptors until they
-reopen them or restart.
+plugin pod. A pass every 30s logs each dead mount and drops the targets and users that
+kubelet removed without unpublishing them.
+
+A dead mount is replaced only when a CSI caller stages the volume again:
+`NodeStageVolume` mounts it anew at the same path, whether the volume is unstaged
+first or still staged. Kubelet does so after a node reboot. Pods that were running keep
+their copy of the dead mount and see `Transport endpoint is not connected` until their
+volume paths are published again, which takes a restart of the pod or a healer.
+[csi-mount-healer](https://github.com/Ruakij/csi-mount-healer) is the recommended
+companion: it unstages and stages the volume, and publishes it to each pod again.
+`NodePublishVolume` fails with `FailedPrecondition` for a staged volume that is not
+mounted, so a new pod waits until the volume is staged again.
 
 An rclone that still runs is never stopped or replaced, because the copies of its mount
 in the pods' containers live and die with it, and kubelet does not hand out new ones to
 running pods. A mount of a running rclone that does not answer, or is not mounted, is
 reported in the node plugin log as `leaving it alone` and left as it is; staging and
-publishing the volume fail meanwhile. Only a mount whose rclone is gone is remounted.
+publishing the volume fail meanwhile. Only a mount whose rclone is gone is remounted,
+when it is staged again.
 Probing a mount point times out after 5s, so a mount that hangs holds up a pass and the
 calls for its volume by that much, not indefinitely.
 
@@ -434,7 +446,7 @@ Mount code is Linux-only; on a non-Linux machine, build and vet with `GOOS=linux
 
 `go test ./...` runs the unit tests, and on Linux the csi-test sanity suite. `make e2e`
 installs the chart into a [kind](https://kind.sigs.k8s.io) cluster and checks writes,
-read-only volumes, the allow-list, driver restarts, remounts, shared mounts and cleanup
+read-only volumes, the allow-list, driver restarts, dead mounts staying dead until staged again, shared mounts and cleanup
 from real pods; `E2E_KEEP=1` leaves the cluster running.
 
 `git config core.hooksPath .githooks` enables the pre-commit hook, which runs

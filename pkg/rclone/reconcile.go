@@ -36,8 +36,9 @@ func scopeConfig(lifetime scope.Lifetime) scope.Config {
 	}
 }
 
-// mounts starts the rclone processes of the node, repairs the mounts of those that died,
-// and serializes both with the CSI calls per mount.
+// mounts starts the rclone processes of the node, cleans up the state of volumes that
+// are gone, and serializes both with the CSI calls per mount. A mount whose rclone died
+// stays dead until a CSI caller stages the volume again.
 type mounts struct {
 	scopes *scope.Manager
 	sup    *supervisor.Supervisor
@@ -74,14 +75,14 @@ func newMounts(ctx context.Context) (*mounts, error) {
 	return m, nil
 }
 
-// run repairs mounts until ctx is done. Only the node plugin has StateDir, so the controller skips it.
+// run reconciles mounts until ctx is done. Only the node plugin has StateDir, so the controller skips it.
 func (m *mounts) run(ctx context.Context) {
 	if _, err := os.Stat(StateDir); err != nil {
 		return
 	}
 	if err := m.scopes.FellBack(); err != nil {
-		klog.Warningf("host systemd is unreachable (%v): rclone mounts die with this pod and are remounted when it restarts, "+
-			"files open across a restart return ENOTCONN until reopened", err)
+		klog.Warningf("host systemd is unreachable (%v): rclone mounts die with this pod and stay dead until the volumes are staged again, "+
+			"pods using them get ENOTCONN", err)
 	}
 	m.sup.Run(ctx)
 }
@@ -103,6 +104,7 @@ func (m *mounts) live(path string) bool {
 // because every container using it holds a copy of the mount that only lives as long as this rclone,
 // and kubelet does not take the copy again for a running pod. So the error says to leave it alone:
 // the mount point does not answer, or it is not mounted although rclone runs.
+// Callers that stage the volume replace a mount that check reports as not live.
 func (m *mounts) check(st volumeState) (fusemount.State, error) {
 	s, err := m.prober.Probe(st.StagingPath)
 	switch {
@@ -114,7 +116,9 @@ func (m *mounts) check(st volumeState) (fusemount.State, error) {
 	return s, nil
 }
 
-// reconcile remounts a volume whose rclone died, and binds it into its pods again. The caller holds the lock.
+// reconcile logs a volume whose rclone died, forgets targets and users that kubelet removed,
+// and unmounts a volume nothing uses. It never remounts: only staging the volume again does.
+// The caller holds the lock.
 func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	// Reloaded under the lock, the volume may have been unstaged or published meanwhile
 	st, err := loadState(volumeID)
@@ -138,11 +142,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		if s == fusemount.Other && !st.Mounted {
 			return
 		}
-		klog.Warningf("rclone for volume %s died, remounting %s", volumeID, st.StagingPath)
-		if err := m.remount(ctx, &st); err != nil {
-			klog.Errorf("remounting volume %s: %v", volumeID, err)
-			return
-		}
+		klog.Warningf("rclone for volume %s is not running, %s stays dead until the volume is staged again (NodeStageVolume)", volumeID, st.StagingPath)
 	case fusemount.Gone:
 		// Kubelet removed the staging path 4.0.0 mounted at, the volume is gone
 		klog.Infof("removing state of volume %s, %s is gone", volumeID, st.StagingPath)
@@ -153,19 +153,8 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		return
 	}
 
-	// Bind mounts still point at the dead mount after a remount
-	for target, readOnly := range st.Targets {
-		switch s, _ := m.prober.Probe(target); s {
-		case fusemount.Dead:
-			klog.Warningf("binding volume %s into %s again", volumeID, target)
-			err := m.detach(target)
-			if err == nil {
-				err = fusemount.Bind(st.StagingPath, target, readOnly)
-			}
-			if err != nil {
-				klog.Errorf("binding volume %s into %s again: %v", volumeID, target, err)
-			}
-		case fusemount.Gone:
+	for target := range st.Targets {
+		if s, _ := m.prober.Probe(target); s == fusemount.Gone {
 			delete(st.Targets, target)
 			changed = true
 		}

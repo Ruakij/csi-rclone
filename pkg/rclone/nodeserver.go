@@ -54,9 +54,12 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	if volumeID == "" || stagingPath == "" || req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume ID, staging target path and volume capability are required")
 	}
-	// Staged already, reconcile repairs a dead mount
+	// Staged already: a mount that is not live is the reason to stage again
 	if st, ok := ns.lockMountOf(stagingPath); ok {
-		ns.sup.Unlock(st.VolumeID)
+		defer ns.sup.Unlock(st.VolumeID)
+		if err := ns.ensureLive(ctx, &st); err != nil {
+			return nil, err
+		}
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -133,15 +136,8 @@ func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user stri
 	case err != nil:
 		return st, status.Error(codes.Internal, err.Error())
 	default:
-		s, err := m.check(st)
-		if err != nil {
-			return st, status.Error(codes.Unavailable, err.Error())
-		}
-		if s != fusemount.Live {
-			if err := m.remount(ctx, &st); err != nil {
-				return st, status.Error(codes.Internal, err.Error())
-			}
-			st.Mounted = true
+		if err := m.ensureLive(ctx, &st); err != nil {
+			return st, err
 		}
 	}
 	if st.Users == nil {
@@ -152,6 +148,27 @@ func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user stri
 		return st, status.Error(codes.Internal, err.Error())
 	}
 	return st, nil
+}
+
+// ensureLive remounts st unless it is live, and saves the state of the new rclone. A mount of an
+// rclone that still runs is never replaced, see check. The caller holds the lock.
+func (m *mounts) ensureLive(ctx context.Context, st *volumeState) error {
+	s, err := m.check(*st)
+	if err != nil {
+		return status.Error(codes.Unavailable, err.Error())
+	}
+	if s == fusemount.Live {
+		return nil
+	}
+	klog.Infof("rclone for volume %s is not running, remounting %s", st.VolumeID, st.StagingPath)
+	if err := m.remount(ctx, st); err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	st.Mounted = true
+	if err := saveState(*st); err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	return nil
 }
 
 func (m *mounts) mountRclone(ctx context.Context, id string, a rcloneArgs) error {
@@ -249,7 +266,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if !ns.live(st.StagingPath) {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not mounted at %s, or does not answer", volumeID, st.StagingPath)
 	}
-	// Recorded before binding, so reconcile can bind it again after rclone dies
+	// Recorded before binding, so a crash in between leaves the target to be unpublished
 	readOnly := req.GetReadonly() || isReadOnly(req.GetVolumeCapability())
 	if st.Targets == nil {
 		st.Targets = map[string]bool{}

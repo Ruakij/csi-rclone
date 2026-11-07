@@ -117,7 +117,7 @@ func (m *mounts) lockMountOf(path string) (volumeState, bool) {
 	return volumeState{}, false
 }
 
-// loadStates skips unreadable files, so one of them cannot keep every other volume from being repaired.
+// loadStates skips unreadable files, so one of them cannot keep every other volume from being reconciled.
 func loadStates() []volumeState {
 	states, errs := stateStore().LoadAll()
 	for _, err := range errs {
@@ -201,7 +201,7 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 
 	// Saved before rclone starts: a crash in between leaves state for a mount
 	// that never came up, which reconcile ignores. The reverse order would leave
-	// a mount nothing knows how to repair.
+	// a mount nothing knows to stage again or to clean up.
 	if err := saveState(st); err != nil {
 		return err
 	}
@@ -307,6 +307,8 @@ func waitForUploads(volumeID string) {
 	klog.Warningf("volume %s still has uploads pending after an hour, unmounting anyway", volumeID)
 }
 
+const rcTimeout = 30 * time.Second
+
 // RcloneRPC calls the rclone rc server listening on socket
 func RcloneRPC(socket string, method string, input string) (output string, err error) {
 	req, err := http.NewRequest("POST", "http://rclone/"+method, strings.NewReader(input))
@@ -315,7 +317,8 @@ func RcloneRPC(socket string, method string, input string) (output string, err e
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Transport: &http.Transport{
+	// An rclone that is stuck accepts the connection and never answers
+	client := &http.Client{Timeout: rcTimeout, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 		},

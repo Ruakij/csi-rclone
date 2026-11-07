@@ -248,21 +248,45 @@ func TestVolumes(t *testing.T) {
 	})
 
 	// SIGKILL leaves a dead FUSE mount, SIGTERM makes rclone unmount before exiting.
+	// The driver does not repair either: the volume has to be staged again, as kubelet does
+	// after a node reboot and a healer does for running pods. Deleting the pods unstages it.
 	for _, sig := range []string{"KILL", "TERM"} {
-		t.Run("rclone is remounted after SIG"+sig, func(t *testing.T) {
+		t.Run("a dead rclone is not remounted before the volume is staged again, SIG"+sig, func(t *testing.T) {
+			rclones := func() string {
+				out, _ := run("docker", "exec", node, "pgrep", "-f", "^rclone mount")
+				return out
+			}
 			if _, err := run("docker", "exec", node, "pkill", "-"+sig, "-f", "^rclone mount"); err != nil {
 				t.Fatal(err)
 			}
-			// Running containers keep the dead mount, a new pod gets the remounted one.
-			create(t, pod("late", claim("data", false)))
+			poll(t, time.Minute, "rclone to exit", func(context.Context) (bool, error) { return rclones() == "", nil })
+
+			// The mount is published to the new pod only from a live staging mount.
+			p := create(t, pod("late", claim("data", false)))
 			t.Cleanup(func() { _ = deletePods(context.Background(), "late") })
-			ready(t, "late")
-			expect(t, "late", "cat /data/f", "hello")
+			failedMount(t, p, "FailedPrecondition")
+			if out := rclones(); out != "" {
+				t.Fatalf("rclone pids %q, want none: the driver remounted a dead mount", out)
+			}
+
+			if err := deletePods(t.Context(), "writer", "late"); err != nil {
+				t.Fatal(err)
+			}
+			poll(t, 2*time.Minute, "the dead mount to be unstaged", func(context.Context) (bool, error) {
+				out, err := run("docker", "exec", node, "sh", "-c", "ls -A /var/lib/csi-rclone; grep rclone /proc/self/mountinfo; true")
+				return err == nil && out == "", nil
+			})
+			create(t, pod("writer", claim("data", false)))
+			ready(t, "writer")
+			expect(t, "writer", "cat /data/f", "hello")
+			if got := rclones(); got == "" || strings.Contains(got, "\n") {
+				t.Errorf("rclone pids %q, want one after staging again", got)
+			}
 		})
 	}
 
 	t.Run("unstaging leaves nothing behind", func(t *testing.T) {
-		if err := deletePods(t.Context(), "writer", "late"); err != nil {
+		if err := deletePods(t.Context(), "writer"); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.CoreV1().PersistentVolumeClaims(ns).Delete(t.Context(), "data", metav1.DeleteOptions{}); err != nil {

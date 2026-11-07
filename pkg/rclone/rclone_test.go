@@ -3,15 +3,19 @@ package rclone
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/scope"
 	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/supervisor"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // inContainer keeps rclone in the process of the test, which has no host systemd.
@@ -177,5 +181,100 @@ func TestCheckLeavesRunningRcloneAlone(t *testing.T) {
 	}
 	if _, err := m.check(st); err != nil {
 		t.Errorf("check after rclone exited: %v", err)
+	}
+}
+
+// fakeRclone stands in for rclone: it records each start in the returned file and exits at once.
+func fakeRclone(t *testing.T) string {
+	t.Helper()
+	dir, marker := t.TempDir(), filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\necho started >> " + marker + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "rclone"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return marker
+}
+
+// deadMountState is a volume whose rclone is gone: the staging path is a plain directory although the state says it was mounted.
+func deadMountState(t *testing.T) volumeState {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("fusemount tells mount states apart on Linux only")
+	}
+	StateDir = t.TempDir()
+	staging := t.TempDir()
+	st := volumeState{VolumeID: "pv", StagingPath: staging, Mounted: true, Args: []string{"mount"},
+		Users: map[string]struct{}{staging: {}, "/gone/user": {}}, Targets: map[string]bool{"/gone/target": false}}
+	if err := os.MkdirAll(volumeDir(st.VolumeID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveState(st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// Only staging the volume again replaces a mount whose rclone died, the reconciler
+// forgets what kubelet removed and leaves the rest.
+func TestReconcileLeavesDeadMountAlone(t *testing.T) {
+	st := deadMountState(t)
+	marker := fakeRclone(t)
+	m := newTestMounts(t)
+
+	m.reconcile(t.Context(), st.VolumeID, false)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("reconcile started rclone for a dead mount")
+	}
+	got, err := loadState(st.VolumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Users[st.StagingPath]; !ok || len(got.Users) != 1 || len(got.Targets) != 0 || !got.Mounted {
+		t.Errorf("state after reconcile = %+v", got)
+	}
+}
+
+func TestEnsureLiveRemountsDeadMount(t *testing.T) {
+	st := deadMountState(t)
+	marker := fakeRclone(t)
+	m := newTestMounts(t)
+
+	// The fake rclone exits at once, so the remount fails, but it was tried
+	err := m.ensureLive(t.Context(), &st)
+	if status.Code(err) != codes.Internal {
+		t.Errorf("ensureLive() = %v, want Internal", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("ensureLive did not start rclone for a dead mount")
+	}
+}
+
+// NodeUnstageVolume of a dead mount drains uploads first, and the rc socket of a killed rclone stays behind.
+func TestWaitForUploadsReturnsForDeadRclone(t *testing.T) {
+	// Short, as the path of a unix socket is limited to about 100 bytes
+	dir, err := os.MkdirTemp("/tmp", "rc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	StateDir = dir
+	if err := os.MkdirAll(volumeDir("pv"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("unix", rcSocket("pv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	l.Close()
+
+	done := make(chan struct{})
+	go func() { waitForUploads("pv"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForUploads hangs on a socket nobody listens on")
 	}
 }

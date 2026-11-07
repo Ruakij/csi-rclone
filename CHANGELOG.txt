@@ -1,5 +1,9 @@
 # CHANGELOG
 
+Unreleased:
+  - The node plugin does not remount a mount whose rclone died, nor bind it into the pods again. The mount stays dead, and pods see ENOTCONN, until a CSI caller stages the volume again: kubelet after a node reboot, or csi-mount-healer, which is recommended to heal running pods. NodeStageVolume of a volume that is staged already remounts it if its rclone is gone, and fails with Unavailable if that rclone runs but does not answer. A reconcile pass logs the dead mount.
+  - The state of a volume records the driver version and start time of its rclone; they are logged for mounts found live at startup.
+
 4.2.4:
   - rclone v1.76.0, Go 1.27.3.
 
