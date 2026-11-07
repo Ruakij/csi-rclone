@@ -35,10 +35,11 @@ to it unchecked. The fork keeps its volume attributes, `rclone-secret` and Stora
   scope, and the node plugin keeps its state on disk. See [Mount lifetime](#mount-lifetime).
 - **Static, dynamic and ephemeral volumes.** PersistentVolumes, a StorageClass that
   provisions a per-PVC path, and inline CSI volumes.
-- **One rclone per remote.** Volumes with exactly the same rclone arguments, credentials
-  included, share one rclone mount per node, and with it its VFS cache (pods see each
-  other's writes before they are uploaded) and connection. `reuseMounts: false` gives
-  each volume its own.
+- **One rclone per remote for ephemeral volumes.** Ephemeral volumes with exactly the same
+  rclone arguments, credentials included, share one rclone mount per node, and with it its
+  VFS cache (pods see each other's writes before they are uploaded) and connection.
+  `reuseMounts: false` gives each volume its own. Each PersistentVolume has its own mount
+  at the kubelet staging path.
 - **rclone option allow-list.** Options that could read local files, run commands or use
   the node's cloud identity are refused; endpoints can be limited to a set of hosts.
 - **Per-mount resource limits.** `MemoryMax` and `TasksMax` for each rclone scope.
@@ -223,7 +224,7 @@ The values that matter; [values.yaml](charts/csi-rclone/values.yaml) has the res
 | `allowedEndpoints`          | `[]`               | Hosts that endpoint options may point at; entries starting with `.` allow subdomains. Empty allows any.              |
 | `unrestrictedRcloneOptions` | `false`            | Allows every rclone option and backend, see [Security](#security).                                                   |
 | `ephemeralVolumes`          | `true`             | Allow inline CSI volumes. Immutable in the CSIDriver: changing it needs the CSIDriver deleted first.                 |
-| `reuseMounts`               | `true`             | Share one rclone mount between volumes with exactly the same rclone arguments.                                       |
+| `reuseMounts`               | `true`             | Share one rclone mount between ephemeral volumes with exactly the same rclone arguments.                             |
 | `storageClass.create`       | `false`            | Create the StorageClass; `storageClass.{name,pathPattern,sharedRemote,reclaimPolicy}` configure it.                  |
 
 `node.resources` sets no limits on purpose: with `in-container`, a limit would OOM-kill
@@ -246,6 +247,11 @@ Surviving rclone processes are never restarted for an upgrade, since that would 
 their open file descriptors: they keep their rclone version until the volume is
 unmounted.
 
+A PersistentVolume is mounted at the kubelet staging path, as in other CSI drivers, and
+an ephemeral volume under `/var/lib/csi-rclone/<hash>/mnt`. Mounts staged by 4.1.0 to
+4.2.x are under `/var/lib/csi-rclone/<hash>/mnt` for PersistentVolumes too, possibly
+shared, with an empty staging path; they keep that layout until unstaged.
+
 ### Dead mounts
 
 An rclone crash or OOM kill leaves its mount dead in every mode. The node plugin learns
@@ -253,10 +259,12 @@ of it from its child processes or the stopped scope, logs it in a pass every 30s
 drops targets that kubelet removed without unpublishing them.
 
 A dead mount is not repaired in place. It is replaced when a CSI caller stages the
-volume again: `NodeStageVolume` mounts it anew at the same path, whether the volume is
-unstaged first or still staged. Kubelet does so after a node reboot. Running pods keep
-their copy of the dead mount and see `Transport endpoint is not connected` until their
-volume paths are published again, which takes a pod restart or a healer.
+volume again: `NodeStageVolume` mounts it anew at the same path (the staging path for a
+PersistentVolume), whether the volume is unstaged first or still staged. A volume staged
+by 4.1.0 to 4.2.x gets the staging path layout when it is unstaged and staged again.
+Kubelet stages volumes after a node reboot. Running pods keep their copy of the dead
+mount and see `Transport endpoint is not connected` until their volume paths are
+published again, which takes a pod restart or a healer.
 [csi-mount-healer](https://github.com/Ruakij/csi-mount-healer) is the recommended
 companion: it unstages and stages the volume and publishes it to each pod again.
 `NodePublishVolume` fails with `FailedPrecondition` for a staged volume that is not
@@ -296,9 +304,10 @@ node plugin DaemonSet. For each volume on a node, the node plugin:
 1. Merges `rclone-secret`, `nodePublishSecretRef` and `volumeAttributes` into a remote,
    a path, an optional rclone config and rclone flags, and checks them against the
    [rclone option allow-list](#rclone-option-allow-list).
-2. Looks for a running rclone mount with exactly these arguments, credentials and
-   read-only mode included. If there is none, it starts `rclone mount` at
-   `/var/lib/csi-rclone/<hash>/mnt` and moves it into its systemd scope.
+2. Starts `rclone mount` and moves it into its systemd scope. A PersistentVolume is
+   mounted at the kubelet staging path. An ephemeral volume looks for a running rclone
+   mount with exactly these arguments, credentials and read-only mode included, and
+   otherwise mounts at `/var/lib/csi-rclone/<hash>/mnt`.
 3. Records the volume as a user of that mount in `/var/lib/csi-rclone/<hash>/state.json`
    and bind-mounts the mount into the pod, read-only if the pod asks for it.
 4. Waits for pending uploads and unmounts when the last user is unstaged or unpublished.

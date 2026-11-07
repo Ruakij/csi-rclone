@@ -23,7 +23,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// ReuseMounts lets a volume reuse the running rclone mount of another volume with the same rclone arguments.
+// ReuseMounts lets an ephemeral volume reuse the running rclone mount of another ephemeral volume
+// with the same rclone arguments. Persistent volumes always have a mount of their own.
 var ReuseMounts = true
 
 const ephemeralContextKey = "csi.storage.k8s.io/ephemeral"
@@ -72,15 +73,23 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		klog.Warningf("storage parameter error: %s", e)
 		return nil, e
 	}
-	// Reconcile takes a missing staging path for an unstaged volume
-	if err := os.MkdirAll(stagingPath, 0750); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
 
-	id := mountID(volumeID, a)
-	ns.sup.Lock(id)
-	defer ns.sup.Unlock(id)
-	if _, err := ns.acquire(ctx, id, a, stagingPath); err != nil {
+	// Rclone is mounted at the staging path, where tools such as csi-mount-healer look for it
+	// and kubelet refuses to unstage while the mount is also elsewhere. A mount of its own, since
+	// the staging path is the mount point.
+	ns.sup.Lock(volumeID)
+	defer ns.sup.Unlock(volumeID)
+	// Reconcile takes a missing staging path for an unstaged volume. MkdirAll fails on the dead
+	// mount of an rclone that exited, which only then is detached: a live mount is a concurrent stage.
+	if err := os.MkdirAll(stagingPath, 0750); err != nil {
+		if err := ns.detach(stagingPath); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		if err := os.MkdirAll(stagingPath, 0750); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+	}
+	if _, err := ns.acquire(ctx, volumeID, a, stagingPath, stagingPath); err != nil {
 		return nil, err
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
@@ -110,7 +119,7 @@ type rcloneArgs struct {
 	readOnly                       bool
 }
 
-// mountID names the rclone mount of a volume. With ReuseMounts, volumes with
+// mountID names the rclone mount of an ephemeral volume. With ReuseMounts, volumes with
 // the same arguments, credentials included, get the same mount.
 func mountID(volumeID string, a rcloneArgs) string {
 	if !ReuseMounts {
@@ -122,12 +131,13 @@ func mountID(volumeID string, a rcloneArgs) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// acquire adds user to the rclone mount id, mounting it unless it is live. The caller holds the lock on id.
-func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user string) (volumeState, error) {
+// acquire adds user to the rclone mount id, mounting it at mountPoint unless it is live.
+// The caller holds the lock on id.
+func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, mountPoint, user string) (volumeState, error) {
 	st, err := loadState(id)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if err := m.mountRclone(ctx, id, a); err != nil {
+		if err := m.mountRclone(ctx, id, a, mountPoint); err != nil {
 			return st, err
 		}
 		if st, err = loadState(id); err != nil {
@@ -171,12 +181,12 @@ func (m *mounts) ensureLive(ctx context.Context, st *volumeState) error {
 	return nil
 }
 
-func (m *mounts) mountRclone(ctx context.Context, id string, a rcloneArgs) error {
+func (m *mounts) mountRclone(ctx context.Context, id string, a rcloneArgs, mountPoint string) error {
 	// A dead FUSE mount from an rclone that exited
-	if err := m.detach(mountPath(id)); err != nil {
+	if err := m.detach(mountPoint); err != nil {
 		return status.Error(codes.Internal, err.Error())
 	}
-	e := m.mount(ctx, id, a.remote, a.remotePath, mountPath(id), a.configData, a.flags, a.readOnly)
+	e := m.mount(ctx, id, a.remote, a.remotePath, mountPoint, a.configData, a.flags, a.readOnly)
 	if e == nil {
 		return nil
 	}
@@ -205,7 +215,8 @@ func (m *mounts) unmount(ctx context.Context, id, mountPoint string) error {
 		return err
 	}
 	m.stopScope(ctx, id)
-	// Fails if still mounted, so RemoveAll cannot delete files on the remote
+	// Fails if still mounted, so RemoveAll cannot delete files on the remote. A staging path
+	// is kubelet's to remove.
 	if mountPoint == mountPath(id) {
 		if err := os.Remove(mountPoint); err != nil && !os.IsNotExist(err) {
 			return err
@@ -252,7 +263,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		id := mountID(volumeID, a)
 		ns.sup.Lock(id)
 		defer ns.sup.Unlock(id)
-		if st, err = ns.acquire(ctx, id, a, targetPath); err != nil {
+		if st, err = ns.acquire(ctx, id, a, mountPath(id), targetPath); err != nil {
 			return nil, err
 		}
 	} else {

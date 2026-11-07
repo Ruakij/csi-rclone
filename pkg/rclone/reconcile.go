@@ -144,7 +144,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		}
 		klog.Warningf("rclone for volume %s is not running, %s stays dead until the volume is staged again (NodeStageVolume)", volumeID, st.StagingPath)
 	case fusemount.Gone:
-		// Kubelet removed the staging path 4.0.0 mounted at, the volume is gone
+		// Kubelet removed the staging path rclone is mounted at, the volume is gone
 		klog.Infof("removing state of volume %s, %s is gone", volumeID, st.StagingPath)
 		m.stopScope(ctx, volumeID)
 		if err := os.RemoveAll(volumeDir(volumeID)); err != nil {

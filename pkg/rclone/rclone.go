@@ -43,7 +43,8 @@ func rcSocket(volumeID string) string {
 type volumeState struct {
 	// VolumeID names the mount, see mountID
 	VolumeID string `json:"volumeID"`
-	// StagingPath is where rclone is mounted
+	// StagingPath is where rclone is mounted: the kubelet staging path of a persistent volume, or
+	// mountPath. Mounts of 4.1.0 to 4.2.x used mountPath for persistent volumes as well, and may be shared by several.
 	StagingPath string   `json:"stagingPath"`
 	Args        []string `json:"args"`
 	Env         []string `json:"env"`
@@ -90,7 +91,7 @@ func (st *volumeState) addLegacyUser() {
 	}
 }
 
-// mountPath is where rclone is mounted, and bound from into staging and target paths.
+// mountPath is where rclone is mounted for ephemeral volumes, and bound from into their target paths.
 func mountPath(volumeID string) string {
 	return filepath.Join(volumeDir(volumeID), "mnt")
 }
@@ -129,8 +130,8 @@ func loadStates() []volumeState {
 	return states
 }
 
-// mount starts rclone for a volume at its staging path.
-func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remotePath string, stagingPath string, configData string, flags map[string]string, readOnly bool) error {
+// mount starts rclone for a volume at mountPoint.
+func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remotePath string, mountPoint string, configData string, flags map[string]string, readOnly bool) error {
 	dir := volumeDir(volumeID)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -153,11 +154,11 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 	}
 
 	// rclone mount remote:path /path/to/mountpoint [flags]
-	st := volumeState{VolumeID: volumeID, StagingPath: stagingPath}
+	st := volumeState{VolumeID: volumeID, StagingPath: mountPoint}
 	st.Args = []string{
 		"mount",
 		remoteWithPath,
-		stagingPath,
+		mountPoint,
 		"--rc",
 		"--rc-addr=unix://" + rcSocket(volumeID),
 		"--log-file=" + filepath.Join(dir, "rclone.log"),
@@ -195,7 +196,7 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 		st.Env = append(st.Env, fmt.Sprintf("%s=%s", flagToEnvName(k), v))
 	}
 
-	if err := os.MkdirAll(stagingPath, 0750); err != nil {
+	if err := os.MkdirAll(mountPoint, 0750); err != nil {
 		return err
 	}
 
@@ -215,7 +216,7 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 
 const mountWaitTimeout = time.Minute
 
-// startRclone returns once rclone serves the staging path, and records in st which driver started it when.
+// startRclone returns once rclone serves the mount point, and records in st which driver started it when.
 func (m *mounts) startRclone(ctx context.Context, st *volumeState) error {
 	logFile := filepath.Join(volumeDir(st.VolumeID), "rclone.log")
 	var logOffset int64

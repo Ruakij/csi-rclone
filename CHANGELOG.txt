@@ -1,6 +1,8 @@
 # CHANGELOG
 
-Unreleased:
+4.3.0:
+  - PersistentVolumes are mounted at the kubelet staging path again, as in 4.0.0 and other CSI drivers, so tools that check the staging path, such as csi-mount-healer, see the mount. Each PersistentVolume has its own rclone.
+  - reuseMounts shares rclone mounts only between ephemeral volumes. Mounts staged by 4.1.0 to 4.2.x keep their layout (rclone under /var/lib/csi-rclone/<hash>/mnt, possibly shared) until the volume is unstaged.
   - The node plugin does not remount a mount whose rclone died, nor bind it into the pods again. The mount stays dead, and pods see ENOTCONN, until a CSI caller stages the volume again: kubelet after a node reboot, or csi-mount-healer, which is recommended to heal running pods. NodeStageVolume of a volume that is staged already remounts it if its rclone is gone, and fails with Unavailable if that rclone runs but does not answer. A reconcile pass logs the dead mount.
   - The state of a volume records the driver version and start time of its rclone; they are logged for mounts found live at startup.
 

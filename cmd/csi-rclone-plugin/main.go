@@ -46,7 +46,7 @@ func main() {
 	cmd.Flags().StringVar(&scopeMemoryMax, "scope-memory-max", "", "MemoryMax of each rclone systemd scope, e.g. 2Gi")
 	cmd.Flags().Uint64Var(&rclone.ScopeTasksMax, "scope-tasks-max", 0, "TasksMax of each rclone systemd scope")
 	cmd.Flags().BoolVar(&rclone.ReuseMounts, "reuse-mounts", true,
-		"reuse a running rclone mount for volumes whose rclone arguments match it exactly, credentials included")
+		"reuse a running rclone mount for ephemeral volumes whose rclone arguments match it exactly, credentials included")
 	cmd.Flags().BoolVar(&rclone.UnrestrictedOptions, "unrestricted-rclone-options", false,
 		"pass every rclone option and backend through, which gives whoever writes PersistentVolumes or rclone-secret root on the node")
 	cmd.Flags().StringSliceVar(&rclone.AllowedBackends, "allowed-backends", nil, "backends volumes may use, default all supported ones")

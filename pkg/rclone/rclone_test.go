@@ -184,11 +184,11 @@ func TestCheckLeavesRunningRcloneAlone(t *testing.T) {
 	}
 }
 
-// fakeRclone stands in for rclone: it records each start in the returned file and exits at once.
+// fakeRclone stands in for rclone: it records the arguments of each start as a line of the returned file and exits at once.
 func fakeRclone(t *testing.T) string {
 	t.Helper()
 	dir, marker := t.TempDir(), filepath.Join(t.TempDir(), "started")
-	script := "#!/bin/sh\necho started >> " + marker + "\nexit 1\n"
+	script := "#!/bin/sh\necho \"$@\" >> " + marker + "\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(dir, "rclone"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

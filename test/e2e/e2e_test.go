@@ -209,6 +209,16 @@ func TestVolumes(t *testing.T) {
 		failedMount(t, p, "InvalidArgument")
 	})
 
+	// Kubelet and tools such as csi-mount-healer look for the mount at the staging path
+	t.Run("the kubelet staging path is a mount of rclone", func(t *testing.T) {
+		if got := stagingMounts(); len(got) != 1 {
+			t.Fatalf("staging paths mounted as fuse.rclone: %q, want one", got)
+		}
+		if out, err := run("docker", "exec", node, "sh", "-c", "cat \"$(awk '$5 ~ /globalmount$/ {print $5}' /proc/self/mountinfo | head -n1)/f\""); err != nil || out != "hello" {
+			t.Errorf("file read through the staging path: %q, %v", out, err)
+		}
+	})
+
 	t.Run("mounts survive a driver restart", func(t *testing.T) {
 		before := driverPod(t)
 		kubectl(t, "-n", driverNS, "rollout", "restart", "ds/"+release+"-node")
@@ -282,6 +292,9 @@ func TestVolumes(t *testing.T) {
 			if got := rclones(); got == "" || strings.Contains(got, "\n") {
 				t.Errorf("rclone pids %q, want one after staging again", got)
 			}
+			if got := stagingMounts(); len(got) != 1 {
+				t.Errorf("staging paths mounted as fuse.rclone after staging again: %q, want one", got)
+			}
 		})
 	}
 
@@ -295,13 +308,20 @@ func TestVolumes(t *testing.T) {
 		poll(t, 2*time.Minute, "no rclone scopes, state or mounts on the node", func(context.Context) (bool, error) {
 			out, err := run("docker", "exec", node, "sh", "-c",
 				"systemctl list-units --no-legend 'csi-rclone-*'; ls -A /var/lib/csi-rclone; grep rclone /proc/self/mountinfo; true")
-			return err == nil && out == "", nil
+			return err == nil && out == "" && len(stagingMounts()) == 0, nil
 		})
 	})
 }
 
-// TestSharedMounts mounts one remote as an ephemeral volume with credentials from a
-// Secret and as a PersistentVolume with them in volumeAttributes: both reuse one rclone.
+// stagingMounts lists the kubelet staging paths on the node that are mounted as fuse.rclone.
+func stagingMounts() []string {
+	out, _ := run("docker", "exec", node, "awk", `$5 ~ /\/globalmount$/ && / - fuse\.rclone / {print $5}`, "/proc/self/mountinfo")
+	return strings.Fields(out)
+}
+
+// TestSharedMounts mounts one remote as two ephemeral volumes with credentials from a
+// Secret and as a PersistentVolume with them in volumeAttributes: the ephemeral volumes
+// share one rclone, the PersistentVolume has one of its own.
 func TestSharedMounts(t *testing.T) {
 	attrs := map[string]string{
 		"remote": "s3", "remotePath": "bucket/shared", "s3-provider": "Rclone",
@@ -338,31 +358,57 @@ func TestSharedMounts(t *testing.T) {
 	})
 	createPVC(t, "shared", "", pv.Name)
 
-	create(t, pod("ephemeral", corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+	ephemeral := corev1.Volume{Name: "data", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
 		Driver: "csi-rclone", VolumeAttributes: attrs, NodePublishSecretRef: &corev1.LocalObjectReference{Name: secret.Name},
-	}}}))
+	}}}
+	create(t, pod("ephemeral-a", ephemeral))
+	create(t, pod("ephemeral-b", ephemeral))
 	create(t, pod("persistent", claim("shared", false)))
-	t.Cleanup(func() { _ = deletePods(context.Background(), "ephemeral", "persistent") })
-	ready(t, "ephemeral")
+	t.Cleanup(func() { _ = deletePods(context.Background(), "ephemeral-a", "ephemeral-b", "persistent") })
+	ready(t, "ephemeral-a")
+	ready(t, "ephemeral-b")
 	ready(t, "persistent")
 
 	rclones := func() string {
 		out, _ := run("docker", "exec", node, "sh", "-c", "pgrep -fc '^rclone mount :s3:bucket/shared'; true")
 		return out
 	}
-	t.Run("volumes with the same arguments reuse one rclone", func(t *testing.T) {
-		expect(t, "ephemeral", "echo shared > /data/f && cat /data/f", "shared")
-		expect(t, "persistent", "cat /data/f", "shared")
-		if n := rclones(); n != "1" {
-			t.Fatalf("%s rclone processes, want 1", n)
+	t.Run("ephemeral volumes with the same arguments reuse one rclone, a persistent volume has its own", func(t *testing.T) {
+		expect(t, "ephemeral-a", "echo shared > /data/f && cat /data/f", "shared")
+		expect(t, "ephemeral-b", "cat /data/f", "shared")
+		// Its own rclone sees the file only once the upload is done and its directory cache expired
+		poll(t, time.Minute, "the persistent volume to see the file", func(context.Context) (bool, error) {
+			out, err := exe("persistent", "cat /data/f")
+			return err == nil && out == "shared", nil
+		})
+		if n := rclones(); n != "2" {
+			t.Fatalf("%s rclone processes, want 2", n)
+		}
+		// The ephemeral volumes mount under the state directory, the persistent volume at its staging path
+		out, _ := run("docker", "exec", node, "awk", `$5 ~ /^\/var\/lib\/csi-rclone\/[0-9a-f]+\/mnt$/ && / - fuse\.rclone / {print $5}`, "/proc/self/mountinfo")
+		if got := strings.Fields(out); len(got) != 1 {
+			t.Errorf("rclone mounts under the state directory: %q, want one", got)
+		}
+		if got := stagingMounts(); len(got) != 1 {
+			t.Errorf("staging paths mounted as fuse.rclone: %q, want one", got)
 		}
 	})
 
-	t.Run("the last volume unmounts it", func(t *testing.T) {
-		if err := deletePods(t.Context(), "ephemeral"); err != nil {
+	t.Run("the last ephemeral volume unmounts its rclone", func(t *testing.T) {
+		if err := deletePods(t.Context(), "ephemeral-a"); err != nil {
 			t.Fatal(err)
 		}
+		expect(t, "ephemeral-b", "cat /data/f", "shared")
+		if err := deletePods(t.Context(), "ephemeral-b"); err != nil {
+			t.Fatal(err)
+		}
+		poll(t, time.Minute, "only the rclone of the persistent volume", func(context.Context) (bool, error) {
+			return rclones() == "1", nil
+		})
 		expect(t, "persistent", "cat /data/f", "shared")
+	})
+
+	t.Run("unstaging the persistent volume unmounts its rclone", func(t *testing.T) {
 		if err := deletePods(t.Context(), "persistent"); err != nil {
 			t.Fatal(err)
 		}
