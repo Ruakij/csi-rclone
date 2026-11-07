@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/fusemount"
 	"github.com/Ruakij/go-csi-fuse-supervisor/pkg/scope"
@@ -126,10 +127,11 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 		klog.Errorf("leaving it alone: %v", err)
 		return
 	}
+	changed := false
 	switch s {
 	case fusemount.Live:
 		if first {
-			klog.Infof("found live mount of volume %s at %s", volumeID, st.StagingPath)
+			klog.Infof("found live mount of volume %s at %s, %s", volumeID, st.StagingPath, st.origin())
 		}
 	case fusemount.Dead, fusemount.Other:
 		// rclone unmounts when stopped with SIGTERM, leaving a plain directory
@@ -137,7 +139,7 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 			return
 		}
 		klog.Warningf("rclone for volume %s died, remounting %s", volumeID, st.StagingPath)
-		if err := m.remount(ctx, st); err != nil {
+		if err := m.remount(ctx, &st); err != nil {
 			klog.Errorf("remounting volume %s: %v", volumeID, err)
 			return
 		}
@@ -152,7 +154,6 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	}
 
 	// Bind mounts still point at the dead mount after a remount
-	changed := false
 	for target, readOnly := range st.Targets {
 		switch s, _ := m.prober.Probe(target); s {
 		case fusemount.Dead:
@@ -191,9 +192,17 @@ func (m *mounts) reconcile(ctx context.Context, volumeID string, first bool) {
 	}
 }
 
+// origin tells which driver version started the rclone of st and how long ago.
+func (st volumeState) origin() string {
+	if st.StartedAt.IsZero() {
+		return "started by a driver up to 4.2.4, at an unknown time"
+	}
+	return fmt.Sprintf("started %s ago by driver %s", time.Since(st.StartedAt).Round(time.Minute), st.DriverVersion)
+}
+
 // remount replaces the mount of st: it is unmounted, what is left of the old scope is
 // stopped so that the new rclone can take its name, and rclone is started again.
-func (m *mounts) remount(ctx context.Context, st volumeState) error {
+func (m *mounts) remount(ctx context.Context, st *volumeState) error {
 	if err := m.detach(st.StagingPath); err != nil {
 		return err
 	}

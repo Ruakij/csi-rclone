@@ -54,6 +54,10 @@ type volumeState struct {
 	Targets map[string]bool `json:"targets,omitempty"`
 	// Mounted tells an rclone that exited cleanly apart from a mount that never came up
 	Mounted bool `json:"mounted,omitempty"`
+	// DriverVersion and StartedAt tell how old the running rclone is: a live mount
+	// survives plugin upgrades until the pods using it stop. Empty for mounts of 4.2.4 and earlier.
+	DriverVersion string    `json:"driverVersion,omitempty"`
+	StartedAt     time.Time `json:"startedAt,omitzero"`
 }
 
 func statePath(volumeID string) string {
@@ -201,7 +205,7 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 	if err := saveState(st); err != nil {
 		return err
 	}
-	if err := m.startRclone(ctx, st); err != nil {
+	if err := m.startRclone(ctx, &st); err != nil {
 		_ = os.Remove(statePath(volumeID))
 		return err
 	}
@@ -211,8 +215,8 @@ func (m *mounts) mount(ctx context.Context, volumeID string, remote string, remo
 
 const mountWaitTimeout = time.Minute
 
-// startRclone returns once rclone serves the staging path.
-func (m *mounts) startRclone(ctx context.Context, st volumeState) error {
+// startRclone returns once rclone serves the staging path, and records in st which driver started it when.
+func (m *mounts) startRclone(ctx context.Context, st *volumeState) error {
 	logFile := filepath.Join(volumeDir(st.VolumeID), "rclone.log")
 	var logOffset int64
 	if fi, err := os.Stat(logFile); err == nil {
@@ -236,6 +240,8 @@ func (m *mounts) startRclone(ctx context.Context, st volumeState) error {
 		return fmt.Errorf("mounting failed: %w, rclone log: %q", err, readLog(logFile, logOffset))
 	}
 	klog.V(4).Infof("mounted volume %s at %s (pid %d)", st.VolumeID, st.StagingPath, d.Pid())
+	st.DriverVersion = DriverVersion
+	st.StartedAt = time.Now().UTC()
 	return nil
 }
 

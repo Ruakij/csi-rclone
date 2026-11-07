@@ -138,7 +138,7 @@ func (m *mounts) acquire(ctx context.Context, id string, a rcloneArgs, user stri
 			return st, status.Error(codes.Unavailable, err.Error())
 		}
 		if s != fusemount.Live {
-			if err := m.remount(ctx, st); err != nil {
+			if err := m.remount(ctx, &st); err != nil {
 				return st, status.Error(codes.Internal, err.Error())
 			}
 			st.Mounted = true

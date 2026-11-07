@@ -39,12 +39,16 @@ func TestState(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := volumeState{VolumeID: id, StagingPath: mountPath(id), Args: []string{"mount", "a:b"}, Env: []string{"RCLONE_X=1"},
-		Users: map[string]struct{}{"/staging": {}}, Targets: map[string]bool{"/t": true}}
+		Users: map[string]struct{}{"/staging": {}}, Targets: map[string]bool{"/t": true},
+		DriverVersion: "v4.3.0", StartedAt: time.Now().Add(-90 * time.Minute).UTC()}
 	if err := saveState(want); err != nil {
 		t.Fatal(err)
 	}
 	if states := loadStates(); len(states) != 1 || !reflect.DeepEqual(states[0], want) {
 		t.Errorf("loadStates() = %+v, want [%+v]", states, want)
+	}
+	if got, want := want.origin(), "started 1h30m0s ago by driver v4.3.0"; got != want {
+		t.Errorf("origin() = %q, want %q", got, want)
 	}
 	if fi, err := os.Stat(statePath(id)); err != nil || fi.Mode().Perm() != 0600 {
 		t.Errorf("state file: %v, %v", fi, err)
