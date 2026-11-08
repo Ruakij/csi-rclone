@@ -57,12 +57,14 @@ to it unchecked. The fork keeps its volume attributes, `rclone-secret` and Stora
   is `in-container`, host PID.
 - On MicroK8s, `kubeletRootDir` set to `/var/snap/microk8s/common/var/lib/kubelet`.
 - On Ubuntu 26.04 hosts, an AppArmor override for `fusermount3`, whose distribution
-  profile denies mounts below `/var/lib/csi-rclone` (pods stay in `ContainerCreating`
-  with `fusermount3: mount failed: Permission denied`). On each node, add to
-  `/etc/apparmor.d/local/fusermount3`:
+  profile denies mounts below `/var/lib/csi-rclone` and the kubelet staging path (pods
+  stay in `ContainerCreating` with `fusermount3: mount failed: Permission denied`). On
+  each node, add to `/etc/apparmor.d/local/fusermount3`, with `kubeletRootDir` in place
+  of `/var/lib/kubelet` if it differs:
 
   ```
   mount fstype=fuse.rclone -> /var/lib/csi-rclone/**,
+  mount fstype=fuse.rclone -> /var/lib/kubelet/plugins/kubernetes.io/csi/**,
   ```
 
   and reload with `apparmor_parser -r /etc/apparmor.d/fusermount3`.
