@@ -40,7 +40,7 @@ provisioner:
 attacher:
   image:
     repository: registry.k8s.io/sig-storage/csi-attacher
-    tag: v4.13.0
+    tag: v4.13.1
     pullPolicy: IfNotPresent
   resources:
     requests:
